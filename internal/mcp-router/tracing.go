@@ -8,13 +8,18 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
-const tracerName = "mcp-router"
+const instrumentationName = "mcp-router"
 
 func tracer() trace.Tracer {
-	return otel.Tracer(tracerName)
+	return otel.Tracer(instrumentationName)
+}
+
+func meter() metric.Meter {
+	return otel.GetMeterProvider().Meter(instrumentationName)
 }
 
 type headerCarrier struct {

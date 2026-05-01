@@ -13,6 +13,7 @@ import (
 	eppb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -240,6 +241,21 @@ func (s *ExtProcServer) validateSession(sessionID string) *RouterError {
 
 // HandleToolCall will handle an MCP Tool Call
 func (s *ExtProcServer) HandleToolCall(ctx context.Context, mcpReq *MCPRequest) []*eppb.ProcessingResponse {
+	start := time.Now()
+	routeServer, routeStatus := "", "error"
+	defer func() {
+		if h, err := meter().Float64Histogram(
+			"mcp.router.tool_call.duration",
+			metric.WithDescription("Duration of MCP tool call routing"),
+			metric.WithUnit("s"),
+		); err == nil {
+			h.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
+				attribute.String("mcp.server", routeServer),
+				attribute.String("status", routeStatus),
+			))
+		}
+	}()
+
 	toolName := mcpReq.ToolName()
 
 	ctx, span := tracer().Start(ctx, "mcp-router.tool-call",
@@ -307,6 +323,7 @@ data: {"result":{"content":[{"type":"text","text":"MCP error -32602: Tool not fo
 		return calculatedResponse.Build()
 	}
 
+	routeServer = serverInfo.Name
 	span.SetAttributes(
 		attribute.String("mcp.server", serverInfo.Name),
 		attribute.String("mcp.server.hostname", serverInfo.Hostname),
@@ -415,6 +432,7 @@ data: {"result":{"content":[{"type":"text","text":"MCP error -32602: Tool not fo
 	}
 	headers.WithPath(path)
 	headers.WithContentLength(len(body))
+	routeStatus = "ok"
 	if mcpReq.Streaming {
 		s.Logger.DebugContext(ctx, "returning streaming response")
 		calculatedResponse.WithStreamingResponse(headers.Build(), body)
@@ -551,13 +569,18 @@ func (s *ExtProcServer) initializeMCPSeverSession(ctx context.Context, mcpReq *M
 		initSpan.SetStatus(codes.Error, "failed to initialize backend session")
 		return "", NewRouterErrorf(500, "failed to create session for mcp server: %w", err)
 	}
+	// closerCtx must not be the request-scoped ctx: the ext_proc gRPC stream context
+	// is cancelled as soon as the tool call completes (seconds), but this closure fires
+	// when the JWT session expires (up to 24 h later). Using the cancelled ctx causes
+	// Redis Del to fail silently, leaving session hash keys in Redis indefinitely.
+	closerCtx := context.WithoutCancel(ctx)
 	var sessionCloser = func() {
-		s.Logger.DebugContext(ctx, "gateway session expired closing client", "Session ", mcpReq.GetSessionID())
+		s.Logger.DebugContext(closerCtx, "gateway session expired closing client", "Session ", mcpReq.GetSessionID())
 		if err := clientHandle.Close(); err != nil {
-			s.Logger.DebugContext(ctx, "failed to close client connection", "err", err)
+			s.Logger.DebugContext(closerCtx, "failed to close client connection", "err", err)
 		}
-		if err := s.SessionCache.DeleteSessions(ctx, mcpReq.GetSessionID()); err != nil {
-			s.Logger.DebugContext(ctx, "failed to delete session", "session", mcpReq.GetSessionID(), "err", err)
+		if err := s.SessionCache.DeleteSessions(closerCtx, mcpReq.GetSessionID()); err != nil {
+			s.Logger.DebugContext(closerCtx, "failed to delete session", "session", mcpReq.GetSessionID(), "err", err)
 		}
 	}
 	// close connection with remote backend and delete any sessions when our gateway session expires

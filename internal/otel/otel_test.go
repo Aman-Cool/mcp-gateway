@@ -61,6 +61,31 @@ func TestSetupOTelSDK_TracesEnabled(t *testing.T) {
 	}
 }
 
+func TestSetupOTelSDK_MetricsEnabled(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://localhost:4318")
+	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	shutdown, _, err := SetupOTelSDK(t.Context(), "", "", "v1.0.0", logger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mp := otel.GetMeterProvider()
+	if mp == nil {
+		t.Error("expected global MeterProvider to be set")
+	}
+
+	m := mp.Meter("test")
+	if m == nil {
+		t.Error("expected to get a meter")
+	}
+
+	// Shutdown may fail to reach the collector in unit tests; only check for panic.
+	_ = shutdown(t.Context())
+}
+
 func TestSetupOTelSDK_LogsEnabled(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://localhost:4318")
 	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
