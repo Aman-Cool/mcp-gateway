@@ -42,7 +42,7 @@ var _ = Describe("AuthPolicy Authentication and Authorization", Ordered, func() 
 			Expect(k8sClient.Patch(ctx, ext, patch)).To(Succeed())
 
 			By("Waiting for gateway to roll out with trusted headers")
-			Expect(WaitForDeploymentReady(ctx, SystemNamespace, "mcp-gateway", 1)).To(Succeed())
+			Expect(WaitForDeploymentReady(ctx, SystemNamespace, "mcp-gateway")).To(Succeed())
 		}
 
 		By("Creating MCPServerRegistrations matching Keycloak client IDs")

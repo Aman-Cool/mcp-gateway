@@ -283,7 +283,7 @@ var _ = Describe("MCP Gateway Registration Happy Path", func() {
 				ext.Spec.SessionStore = nil
 				g.Expect(k8sClient.Update(ctx, ext)).To(Succeed())
 			}, TestTimeoutMedium, TestRetryInterval).Should(Succeed())
-			Expect(WaitForDeploymentReady(ctx, SystemNamespace, deploymentName, 1)).To(Succeed())
+			Expect(WaitForDeploymentReady(ctx, SystemNamespace, deploymentName)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, redisSecret)).To(Succeed())
 		})
 
@@ -601,7 +601,7 @@ var _ = Describe("MCP Gateway Registration Happy Path", func() {
 
 		By("Waiting for deployment to be ready")
 		Eventually(func(g Gomega) {
-			g.Expect(WaitForDeploymentReady(ctx, TestServerNameSpace, scaledMCPTestServer, 1)).To(Succeed())
+			g.Expect(WaitForDeploymentReady(ctx, TestServerNameSpace, scaledMCPTestServer)).To(Succeed())
 		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
 
 		By("Ensuring the gateway has registered the server")
@@ -656,7 +656,7 @@ var _ = Describe("MCP Gateway Registration Happy Path", func() {
 
 		By("Waiting for deployment to be ready")
 		Eventually(func(g Gomega) {
-			g.Expect(WaitForDeploymentReady(ctx, TestServerNameSpace, scaledMCPTestServer, 1)).To(Succeed())
+			g.Expect(WaitForDeploymentReady(ctx, TestServerNameSpace, scaledMCPTestServer)).To(Succeed())
 		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
 
 		By("Verifying tools are restored in tools/list")
