@@ -4,19 +4,18 @@ set -e
 # backfill-triage.sh: Fixes issues missing triage labels or having duplicate priority labels.
 # Requires GitHub CLI (gh) and jq.
 
-# Fetch all open issues
+# Fetch all open issues with pagination to avoid truncation
 echo "Fetching open issues..."
-issues=$(gh issue list --state open --limit 1000 --json number,labels,milestone)
+issues=$(gh issue list --state open --paginate --json number,labels,milestone)
 
 echo "$issues" | jq -c '.[]' | while read -r issue; do
   number=$(echo "$issue" | jq -r '.number')
   milestone=$(echo "$issue" | jq -r '.milestone')
-  # Extract label names into a space-separated string
-  labels_str=$(echo "$issue" | jq -r '.labels[].name')
-  # Convert to array for easier processing
-  read -ra labels <<< "$labels_str"
   
   echo "Processing issue #$number"
+  
+  # Populate labels array from jq output using mapfile for correct newline handling
+  mapfile -t labels < <(echo "$issue" | jq -r '.labels[].name')
   
   labels_to_add=()
   labels_to_remove=()
@@ -113,7 +112,8 @@ echo "$issues" | jq -c '.[]' | while read -r issue; do
   # Apply removals
   for lr in "${labels_to_remove[@]}"; do
     # Only remove if it's currently present
-    if [[ " ${labels[*]} " =~ " $lr " ]]; then
+    # Unquoted $lr to avoid SC2076 literal match issues
+    if [[ " ${labels[*]} " =~  $lr  ]]; then
       echo "  Removing label: $lr"
       gh issue edit "$number" --remove-label "$lr" || echo "  Warning: Failed to remove label $lr"
     fi
