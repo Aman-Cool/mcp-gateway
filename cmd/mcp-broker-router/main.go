@@ -384,6 +384,9 @@ func setUpRouter(broker broker.MCPBroker, logger *slog.Logger, jwtManager *sessi
 		MaxRequestBodySize: maxRequestBodySize,
 	}
 
+	if err := server.InitMetrics(); err != nil {
+		log.Fatalf("failed to initialize router metrics: %v", err)
+	}
 	extProcV3.RegisterExternalProcessorServer(grpcSrv, server)
 	return grpcSrv, server
 }

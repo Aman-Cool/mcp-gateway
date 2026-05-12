@@ -244,12 +244,8 @@ func (s *ExtProcServer) HandleToolCall(ctx context.Context, mcpReq *MCPRequest) 
 	start := time.Now()
 	routeServer, routeStatus := "", "error"
 	defer func() {
-		if h, err := meter().Float64Histogram(
-			"mcp.router.tool_call.duration",
-			metric.WithDescription("Duration of MCP tool call routing"),
-			metric.WithUnit("s"),
-		); err == nil {
-			h.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
+		if s.toolCallDuration != nil {
+			s.toolCallDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
 				attribute.String("mcp.server", routeServer),
 				attribute.String("status", routeStatus),
 			))

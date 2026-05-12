@@ -13,7 +13,9 @@ import (
 	"github.com/Kuadrant/mcp-gateway/internal/session"
 	extProcV3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/mark3labs/mcp-go/client"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -43,7 +45,22 @@ type ExtProcServer struct {
 	ElicitationMap     idmap.Map
 	MaxRequestBodySize int
 	//TODO this should not be needed
-	Broker broker.MCPBroker
+	Broker             broker.MCPBroker
+	toolCallDuration   metric.Float64Histogram
+}
+
+// InitMetrics creates the histogram instruments. Must be called after the global MeterProvider is set.
+func (s *ExtProcServer) InitMetrics() error {
+	h, err := otel.GetMeterProvider().Meter(instrumentationName).Float64Histogram(
+		"mcp.router.tool_call.duration",
+		metric.WithDescription("Duration of MCP tool call routing"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return err
+	}
+	s.toolCallDuration = h
+	return nil
 }
 
 // OnConfigChange is used to register the router for config changes
