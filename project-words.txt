@@ -64,6 +64,7 @@ discoveryv
 dnsutils
 Dolrw
 dotdot
+dupl
 Dzpp
 easyjson
 ecparam

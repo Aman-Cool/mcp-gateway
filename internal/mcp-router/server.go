@@ -45,8 +45,8 @@ type ExtProcServer struct {
 	ElicitationMap     idmap.Map
 	MaxRequestBodySize int
 	//TODO this should not be needed
-	Broker             broker.MCPBroker
-	toolCallDuration   metric.Float64Histogram
+	Broker           broker.MCPBroker
+	toolCallDuration metric.Float64Histogram
 }
 
 // InitMetrics creates the histogram instruments. Must be called after the global MeterProvider is set.
