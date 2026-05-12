@@ -117,7 +117,7 @@ func (h *StatusHandler) handleSingleServerByName(_ context.Context, w http.Respo
 	for _, mgr := range h.broker.RegisteredMCPServers() {
 		status := mgr.GetStatus()
 		if status.Name == serverName {
-			h.logger.Info("Retrieved status for specific server", "serverName", serverName)
+			h.logger.Debug("Retrieved status for specific server", "serverName", serverName)
 			h.sendJSONResponse(w, http.StatusOK, &status)
 			return
 		}

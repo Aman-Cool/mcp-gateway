@@ -571,9 +571,9 @@ func (s *ExtProcServer) initializeMCPSeverSession(ctx context.Context, mcpReq *M
 	}
 	// closerCtx must not be the request-scoped ctx: the ext_proc gRPC stream context
 	// is cancelled as soon as the tool call completes (seconds), but this closure fires
-	// when the JWT session expires (up to 24 h later). Using the cancelled ctx causes
-	// Redis Del to fail silently, leaving session hash keys in Redis indefinitely.
-	closerCtx := context.WithoutCancel(ctx)
+	// when the JWT session expires (up to 24 h later). Using a fresh context avoids
+	// both cancellation and retaining request-scoped trace/log values for the session lifetime.
+	closerCtx := context.Background()
 	var sessionCloser = func() {
 		s.Logger.DebugContext(closerCtx, "gateway session expired closing client", "Session ", mcpReq.GetSessionID())
 		if err := clientHandle.Close(); err != nil {

@@ -67,19 +67,15 @@ func TestSetupOTelSDK_MetricsEnabled(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	providerBefore := otel.GetMeterProvider()
+
 	shutdown, _, err := SetupOTelSDK(t.Context(), "", "", "v1.0.0", logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	mp := otel.GetMeterProvider()
-	if mp == nil {
-		t.Error("expected global MeterProvider to be set")
-	}
-
-	m := mp.Meter("test")
-	if m == nil {
-		t.Error("expected to get a meter")
+	if otel.GetMeterProvider() == providerBefore {
+		t.Error("expected global MeterProvider to be replaced by SDK provider after setup")
 	}
 
 	// Shutdown may fail to reach the collector in unit tests; only check for panic.

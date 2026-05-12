@@ -14,12 +14,14 @@ import (
 
 const instrumentationName = "mcp-router"
 
+var routerMeter = otel.GetMeterProvider().Meter(instrumentationName)
+
 func tracer() trace.Tracer {
 	return otel.Tracer(instrumentationName)
 }
 
 func meter() metric.Meter {
-	return otel.GetMeterProvider().Meter(instrumentationName)
+	return routerMeter
 }
 
 type headerCarrier struct {
