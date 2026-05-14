@@ -159,7 +159,12 @@ func (man *MCPManager) Start(ctx context.Context) {
 func (man *MCPManager) Stop() {
 	man.stopOnce.Do(func() {
 		man.ticker.Stop()
+		// Acquire manageMu to wait for any in-flight manage() call to complete before
+		// clearing tools. Without this, manage() can re-add tools via AddTools() after
+		// removeAllTools() has deleted them, leaving the broker with un-routable tools.
+		man.manageMu.Lock()
 		man.removeAllTools()
+		man.manageMu.Unlock()
 		if err := man.MCP.Disconnect(); err != nil {
 			man.logger.Error("failed to disconnect during stop", "upstream mcp server", man.MCP.ID(), "error", err)
 		}
