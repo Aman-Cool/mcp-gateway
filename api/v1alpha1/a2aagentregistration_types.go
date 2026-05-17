@@ -17,11 +17,15 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 type A2AAgentRegistration struct {
 	metav1.TypeMeta `json:",inline"`
 
+	// metadata is a standard object metadata.
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec A2AAgentRegistrationSpec `json:"spec"`
+	// spec defines the desired state of A2AAgentRegistration.
+	// +optional
+	Spec A2AAgentRegistrationSpec `json:"spec,omitempty"`
 
+	// status defines the observed state of A2AAgentRegistration.
 	// +optional
 	Status A2AAgentRegistrationStatus `json:"status,omitempty"`
 }
@@ -30,7 +34,7 @@ type A2AAgentRegistration struct {
 type A2AAgentRegistrationSpec struct {
 	// targetRef specifies the HTTPRoute pointing to the upstream A2A agent.
 	// +required
-	TargetRef TargetReference `json:"targetRef"`
+	TargetRef TargetReference `json:"targetRef,omitzero"`
 
 	// skillPrefix is prepended to each skill ID in the federated card to avoid
 	// naming conflicts across agents.
@@ -50,12 +54,13 @@ type A2AAgentRegistrationSpec struct {
 
 // A2AAgentRegistrationStatus defines the observed state of A2AAgentRegistration.
 type A2AAgentRegistrationStatus struct {
+	// conditions represent the latest available observations of A2AAgentRegistration state.
 	// +listType=map
 	// +listMapKey=type
 	// +patchStrategy=merge
 	// +patchMergeKey=type
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 
 	// discoveredSkills is the number of skills discovered from the upstream agent card.
 	// +optional
