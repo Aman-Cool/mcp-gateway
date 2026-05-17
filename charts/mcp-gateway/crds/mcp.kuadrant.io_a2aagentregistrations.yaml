@@ -62,7 +62,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: A2AAgentRegistrationSpec defines the desired state of A2AAgentRegistration.
+            description: spec defines the desired state of A2AAgentRegistration.
             properties:
               agentCardURL:
                 description: |-
@@ -125,10 +125,11 @@ spec:
             - targetRef
             type: object
           status:
-            description: A2AAgentRegistrationStatus defines the observed state of
-              A2AAgentRegistration.
+            description: status defines the observed state of A2AAgentRegistration.
             properties:
               conditions:
+                description: conditions represent the latest available observations
+                  of A2AAgentRegistration state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -193,8 +194,6 @@ spec:
                 format: int32
                 type: integer
             type: object
-        required:
-        - spec
         type: object
     served: true
     storage: true
