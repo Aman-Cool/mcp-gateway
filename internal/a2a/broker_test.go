@@ -15,25 +15,29 @@ import (
 
 func TestFederatedCard_mergesSkillsWithPrefix(t *testing.T) {
 	weather := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(AgentCard{ //nolint:errcheck
+		if err := json.NewEncoder(w).Encode(AgentCard{
 			Name: "Weather Agent",
 			URL:  "http://weather.internal",
 			Skills: []Skill{
 				{ID: "forecast", Name: "Get Forecast", Description: "Returns a weather forecast"},
 				{ID: "alerts", Name: "Get Alerts"},
 			},
-		})
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}))
 	defer weather.Close()
 
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(AgentCard{ //nolint:errcheck
+		if err := json.NewEncoder(w).Encode(AgentCard{
 			Name: "Search Agent",
 			URL:  "http://search.internal",
 			Skills: []Skill{
 				{ID: "web_search", Name: "Web Search"},
 			},
-		})
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}))
 	defer search.Close()
 
@@ -43,7 +47,7 @@ func TestFederatedCard_mergesSkillsWithPrefix(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	broker := NewA2ABroker(agents, "http://gateway.example.com", logger, nil)
+	broker := NewBroker(agents, "http://gateway.example.com", logger, nil)
 
 	card := broker.FederatedCard(context.Background())
 
@@ -64,7 +68,9 @@ func TestFederatedCard_skipsDisabledAgents(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
-		json.NewEncoder(w).Encode(AgentCard{Skills: []Skill{{ID: "x"}}}) //nolint:errcheck
+		if err := json.NewEncoder(w).Encode(AgentCard{Skills: []Skill{{ID: "x"}}}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}))
 	defer srv.Close()
 
@@ -73,7 +79,7 @@ func TestFederatedCard_skipsDisabledAgents(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	broker := NewA2ABroker(agents, "http://gateway.example.com", logger, nil)
+	broker := NewBroker(agents, "http://gateway.example.com", logger, nil)
 	card := broker.FederatedCard(context.Background())
 
 	require.False(t, called, "disabled agent should not be fetched")
@@ -82,7 +88,9 @@ func TestFederatedCard_skipsDisabledAgents(t *testing.T) {
 
 func TestFederatedCard_toleratesUpstreamFailure(t *testing.T) {
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(AgentCard{Skills: []Skill{{ID: "ok", Name: "OK"}}}) //nolint:errcheck
+		if err := json.NewEncoder(w).Encode(AgentCard{Skills: []Skill{{ID: "ok", Name: "OK"}}}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}))
 	defer good.Close()
 
@@ -92,25 +100,30 @@ func TestFederatedCard_toleratesUpstreamFailure(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	broker := NewA2ABroker(agents, "http://gateway.example.com", logger, nil)
+	broker := NewBroker(agents, "http://gateway.example.com", logger, nil)
 	card := broker.FederatedCard(context.Background())
 
 	require.Len(t, card.Skills, 1)
 	require.Equal(t, "g_ok", card.Skills[0].ID)
 }
 
-func TestGetAgentInfo_resolvesByPrefix(t *testing.T) {
+func TestGetAgentInfo_resolvesByLongestPrefix(t *testing.T) {
 	agents := []*config.A2AAgent{
 		{Name: "weather", CardURL: "http://weather.internal", SkillPrefix: "weather_", Enabled: true},
 		{Name: "search", CardURL: "http://search.internal", SkillPrefix: "search_", Enabled: true},
+		{Name: "weather_advanced", CardURL: "http://weather-adv.internal", SkillPrefix: "weather_adv_", Enabled: true},
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	broker := NewA2ABroker(agents, "http://gateway.example.com", logger, nil)
+	broker := NewBroker(agents, "http://gateway.example.com", logger, nil)
 
 	agent, err := broker.GetAgentInfo("weather_forecast")
 	require.NoError(t, err)
 	require.Equal(t, "weather", agent.Name)
+
+	agent, err = broker.GetAgentInfo("weather_adv_heatmap")
+	require.NoError(t, err)
+	require.Equal(t, "weather_advanced", agent.Name, "longer prefix should win")
 
 	agent, err = broker.GetAgentInfo("search_web_search")
 	require.NoError(t, err)
@@ -122,7 +135,7 @@ func TestGetAgentInfo_resolvesByPrefix(t *testing.T) {
 
 func TestServeAgentCard_methodNotAllowed(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	broker := NewA2ABroker(nil, "http://gateway.example.com", logger, nil)
+	broker := NewBroker(nil, "http://gateway.example.com", logger, nil)
 
 	w := httptest.NewRecorder()
 	broker.ServeAgentCard(w, httptest.NewRequest(http.MethodPost, "/.well-known/agent.json", nil))

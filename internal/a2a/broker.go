@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/Kuadrant/mcp-gateway/internal/config"
 )
 
-// A2ABroker manages upstream A2A agents and serves a federated Agent Card.
-type A2ABroker interface {
+// Broker manages upstream A2A agents and serves a federated Agent Card.
+type Broker interface {
 	// FederatedCard fetches cards from all registered upstream agents and returns
 	// a merged card with prefixed skill IDs, advertising the gateway as the endpoint.
 	FederatedCard(ctx context.Context) AgentCard
@@ -27,7 +28,7 @@ type A2ABroker interface {
 	SetAgents(agents []*config.A2AAgent)
 }
 
-type a2aBrokerImpl struct {
+type brokerImpl struct {
 	mu         sync.RWMutex
 	agents     []*config.A2AAgent
 	gatewayURL string
@@ -35,15 +36,17 @@ type a2aBrokerImpl struct {
 	logger     *slog.Logger
 }
 
-// NewA2ABroker creates a new A2ABroker.
+// NewBroker creates a new Broker.
 // gatewayURL is the publicly accessible URL the federated card will advertise.
 // An optional *http.Client may be supplied for testing; pass nil to use the default.
-func NewA2ABroker(agents []*config.A2AAgent, gatewayURL string, logger *slog.Logger, httpClient *http.Client) A2ABroker {
+func NewBroker(agents []*config.A2AAgent, gatewayURL string, logger *slog.Logger, httpClient *http.Client) Broker {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &a2aBrokerImpl{
-		agents:     agents,
+	cp := make([]*config.A2AAgent, len(agents))
+	copy(cp, agents)
+	return &brokerImpl{
+		agents:     cp,
 		gatewayURL: gatewayURL,
 		httpClient: httpClient,
 		logger:     logger,
@@ -53,7 +56,7 @@ func NewA2ABroker(agents []*config.A2AAgent, gatewayURL string, logger *slog.Log
 // FederatedCard fetches Agent Cards from all enabled upstream agents concurrently,
 // applies each agent's skill prefix, and merges the results into a single card.
 // This mirrors how the MCP broker federates tools from upstream MCP servers.
-func (b *a2aBrokerImpl) FederatedCard(ctx context.Context) AgentCard {
+func (b *brokerImpl) FederatedCard(ctx context.Context) AgentCard {
 	b.mu.RLock()
 	agents := make([]*config.A2AAgent, len(b.agents))
 	copy(agents, b.agents)
@@ -66,7 +69,7 @@ func (b *a2aBrokerImpl) FederatedCard(ctx context.Context) AgentCard {
 	ch := make(chan result, len(agents))
 
 	for _, agent := range agents {
-		if !agent.Enabled {
+		if agent == nil || !agent.Enabled {
 			ch <- result{agent: agent}
 			continue
 		}
@@ -101,7 +104,7 @@ func (b *a2aBrokerImpl) FederatedCard(ctx context.Context) AgentCard {
 }
 
 // ServeAgentCard handles GET /.well-known/agent.json.
-func (b *a2aBrokerImpl) ServeAgentCard(w http.ResponseWriter, r *http.Request) {
+func (b *brokerImpl) ServeAgentCard(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -113,26 +116,39 @@ func (b *a2aBrokerImpl) ServeAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// GetAgentInfo returns the upstream agent config whose skill prefix matches the given skill ID.
-func (b *a2aBrokerImpl) GetAgentInfo(skillID string) (*config.A2AAgent, error) {
+// GetAgentInfo returns the upstream agent whose skill prefix is the longest match for skillID.
+// Longest-match prevents shorter prefixes from shadowing longer ones.
+func (b *brokerImpl) GetAgentInfo(skillID string) (*config.A2AAgent, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	var best *config.A2AAgent
 	for _, a := range b.agents {
-		if a.Enabled && len(skillID) >= len(a.SkillPrefix) && skillID[:len(a.SkillPrefix)] == a.SkillPrefix {
-			return a, nil
+		if a == nil || !a.Enabled || len(a.SkillPrefix) == 0 {
+			continue
 		}
+		if strings.HasPrefix(skillID, a.SkillPrefix) {
+			if best == nil || len(a.SkillPrefix) > len(best.SkillPrefix) {
+				best = a
+			}
+		}
+	}
+	if best != nil {
+		return best, nil
 	}
 	return nil, fmt.Errorf("skill %q does not match any registered agent", skillID)
 }
 
-// SetAgents replaces the agent list atomically.
-func (b *a2aBrokerImpl) SetAgents(agents []*config.A2AAgent) {
+// SetAgents replaces the agent list atomically, copying the slice to avoid
+// retaining a reference to caller-owned memory.
+func (b *brokerImpl) SetAgents(agents []*config.A2AAgent) {
+	cp := make([]*config.A2AAgent, len(agents))
+	copy(cp, agents)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.agents = agents
+	b.agents = cp
 }
 
-func (b *a2aBrokerImpl) fetchCard(ctx context.Context, cardURL string) (*AgentCard, error) {
+func (b *brokerImpl) fetchCard(ctx context.Context, cardURL string) (*AgentCard, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cardURL, nil)
 	if err != nil {
 		return nil, err
@@ -141,7 +157,11 @@ func (b *a2aBrokerImpl) fetchCard(ctx context.Context, cardURL string) (*AgentCa
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			b.logger.Error("failed to close response body", "error", cerr)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("upstream returned %d", resp.StatusCode)
 	}

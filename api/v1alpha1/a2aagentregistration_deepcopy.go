@@ -5,6 +5,7 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
+// DeepCopyInto copies all fields of A2AAgentRegistration into the supplied object.
 func (in *A2AAgentRegistration) DeepCopyInto(out *A2AAgentRegistration) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
@@ -13,6 +14,7 @@ func (in *A2AAgentRegistration) DeepCopyInto(out *A2AAgentRegistration) {
 	in.Status.DeepCopyInto(&out.Status)
 }
 
+// DeepCopy creates a deep copy of A2AAgentRegistration.
 func (in *A2AAgentRegistration) DeepCopy() *A2AAgentRegistration {
 	if in == nil {
 		return nil
@@ -22,6 +24,7 @@ func (in *A2AAgentRegistration) DeepCopy() *A2AAgentRegistration {
 	return out
 }
 
+// DeepCopyObject creates a deep copy of A2AAgentRegistration as a runtime.Object.
 func (in *A2AAgentRegistration) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
@@ -29,6 +32,7 @@ func (in *A2AAgentRegistration) DeepCopyObject() runtime.Object {
 	return nil
 }
 
+// DeepCopyInto copies all fields of A2AAgentRegistrationList into the supplied object.
 func (in *A2AAgentRegistrationList) DeepCopyInto(out *A2AAgentRegistrationList) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
@@ -42,6 +46,7 @@ func (in *A2AAgentRegistrationList) DeepCopyInto(out *A2AAgentRegistrationList) 
 	}
 }
 
+// DeepCopy creates a deep copy of A2AAgentRegistrationList.
 func (in *A2AAgentRegistrationList) DeepCopy() *A2AAgentRegistrationList {
 	if in == nil {
 		return nil
@@ -51,6 +56,7 @@ func (in *A2AAgentRegistrationList) DeepCopy() *A2AAgentRegistrationList {
 	return out
 }
 
+// DeepCopyObject creates a deep copy of A2AAgentRegistrationList as a runtime.Object.
 func (in *A2AAgentRegistrationList) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
@@ -58,6 +64,7 @@ func (in *A2AAgentRegistrationList) DeepCopyObject() runtime.Object {
 	return nil
 }
 
+// DeepCopyInto copies all fields of A2AAgentRegistrationSpec into the supplied object.
 func (in *A2AAgentRegistrationSpec) DeepCopyInto(out *A2AAgentRegistrationSpec) {
 	*out = *in
 	out.TargetRef = in.TargetRef
@@ -68,6 +75,7 @@ func (in *A2AAgentRegistrationSpec) DeepCopyInto(out *A2AAgentRegistrationSpec) 
 	}
 }
 
+// DeepCopy creates a deep copy of A2AAgentRegistrationSpec.
 func (in *A2AAgentRegistrationSpec) DeepCopy() *A2AAgentRegistrationSpec {
 	if in == nil {
 		return nil
@@ -77,6 +85,7 @@ func (in *A2AAgentRegistrationSpec) DeepCopy() *A2AAgentRegistrationSpec {
 	return out
 }
 
+// DeepCopyInto copies all fields of A2AAgentRegistrationStatus into the supplied object.
 func (in *A2AAgentRegistrationStatus) DeepCopyInto(out *A2AAgentRegistrationStatus) {
 	*out = *in
 	if in.Conditions != nil {
@@ -88,6 +97,7 @@ func (in *A2AAgentRegistrationStatus) DeepCopyInto(out *A2AAgentRegistrationStat
 	}
 }
 
+// DeepCopy creates a deep copy of A2AAgentRegistrationStatus.
 func (in *A2AAgentRegistrationStatus) DeepCopy() *A2AAgentRegistrationStatus {
 	if in == nil {
 		return nil

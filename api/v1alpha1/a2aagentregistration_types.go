@@ -20,8 +20,7 @@ type A2AAgentRegistration struct {
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// +optional
-	Spec A2AAgentRegistrationSpec `json:"spec,omitempty"`
+	Spec A2AAgentRegistrationSpec `json:"spec"`
 
 	// +optional
 	Status A2AAgentRegistrationStatus `json:"status,omitempty"`
