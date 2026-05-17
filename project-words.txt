@@ -408,3 +408,13 @@ hrpp
 deadbeefcafebabe
 myprompt
 promptname
+a2aagentregistration
+a2aagent
+a2abroker
+agentcard
+agentauth
+cardurl
+federatedcard
+httptest
+skillprefix
+a2aar

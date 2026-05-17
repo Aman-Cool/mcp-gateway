@@ -4,13 +4,13 @@ package a2a
 // AgentCard is the discovery document served at /.well-known/agent.json.
 // It describes the agent's identity, capabilities, and available skills.
 type AgentCard struct {
-	Name         string            `json:"name"`
-	Description  string            `json:"description,omitempty"`
-	URL          string            `json:"url"`
-	Version      string            `json:"version,omitempty"`
-	Skills       []Skill           `json:"skills"`
+	Name         string             `json:"name"`
+	Description  string             `json:"description,omitempty"`
+	URL          string             `json:"url"`
+	Version      string             `json:"version,omitempty"`
+	Skills       []Skill            `json:"skills"`
 	Capabilities *AgentCapabilities `json:"capabilities,omitempty"`
-	Auth         *AgentAuth        `json:"auth,omitempty"`
+	Auth         *AgentAuth         `json:"auth,omitempty"`
 }
 
 // Skill describes a discrete capability advertised in an AgentCard.
