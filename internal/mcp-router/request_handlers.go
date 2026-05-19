@@ -227,7 +227,7 @@ func (mr *MCPRequest) ToBytes() ([]byte, error) {
 
 // HandleRequestHeaders handles request headers minimally.
 func (s *ExtProcServer) HandleRequestHeaders(ctx context.Context, _ *eppb.HttpHeaders) ([]*eppb.ProcessingResponse, error) {
-	s.Logger.InfoContext(ctx, "Request Handler: HandleRequestHeaders called")
+	s.Logger.DebugContext(ctx, "Request Handler: HandleRequestHeaders called")
 	requestHeaders := NewHeaders()
 	response := NewResponse()
 	requestHeaders.WithAuthority(s.RoutingConfig.MCPGatewayExternalHostname)

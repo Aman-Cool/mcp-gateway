@@ -17,7 +17,7 @@ func (broker *mcpBrokerImpl) FilterPrompts(ctx context.Context, _ any, mcpReq *m
 	if sid := sessionIDFromContext(ctx); sid != "" {
 		attrs = append(attrs, attribute.String("mcp.session.id", sid))
 	}
-	_, span := brokerTracer().Start(ctx, "mcp-broker.prompts-list", trace.WithAttributes(attrs...))
+	ctx, span := brokerTracer().Start(ctx, "mcp-broker.prompts-list", trace.WithAttributes(attrs...))
 	defer span.End()
 
 	broker.logger.DebugContext(ctx, "FilterPrompts called", "input_prompts_count", len(mcpRes.Prompts))

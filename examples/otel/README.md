@@ -73,13 +73,15 @@ The MCP Broker emits spans for request handling, capability filtering, and upstr
 
 ### Span Hierarchy
 
-```
+The router and broker run in the same process. Broker spans are correlated to the
+router trace via W3C Trace Context propagation (the `traceContextMiddleware` extracts
+`traceparent` from the forwarded HTTP request), so they appear in the same trace but
+are **not** direct parent-child spans of the router spans.
+
+```text
 mcp-router.process
 ├── mcp-router.route-decision
 │   ├── mcp-router.broker-passthrough        (if initialize, tools/list, prompts/list, etc.)
-│   │   └── mcp-broker.handle-request        (broker-side)
-│   │       ├── mcp-broker.tools-list        (if tools/list)
-│   │       └── mcp-broker.prompts-list      (if prompts/list)
 │   ├── mcp-router.tool-call                 (if tools/call)
 │   │   ├── mcp-router.broker.get-server-info
 │   │   ├── mcp-router.session-cache.get
@@ -91,6 +93,10 @@ mcp-router.process
 │   │   ├── mcp-router.session-init          (if cache miss)
 │   │   └── mcp-router.session-cache.store   (if cache miss)
 │   └── mcp-router.elicitation-response      (if elicitation response)
+
+mcp-broker.handle-request                    (correlated via traceparent, not a child of router spans)
+├── mcp-broker.tools-list                    (if tools/list)
+└── mcp-broker.prompts-list                  (if prompts/list)
 
 mcp-broker.upstream-manage                   (periodic, not request-scoped)
 ```
@@ -193,7 +199,7 @@ outside the mesh to create end-to-end traces.
 
 ## Architecture
 
-```
+```text
 ┌─────────────────┐     ┌──────────────────────┐     ┌─────────────┐
 │   MCP Gateway   │────▶│   OTEL Collector     │────▶│    Tempo    │
 │                 │     │                      │     │  (traces)   │
