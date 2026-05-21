@@ -43,16 +43,16 @@ type InitForClient func(ctx context.Context, gatewayHost, initToken string, conf
 
 // ExtProcServer struct boolean for streaming & Store headers for later use in body processing
 type ExtProcServer struct {
-	RoutingConfig      *config.MCPServersConfig
-	JWTManager         *session.JWTManager
-	Logger             *slog.Logger
-	InitForClient      InitForClient
-	SessionCache       SessionCache
+	RoutingConfig       *config.MCPServersConfig
+	JWTManager          *session.JWTManager
+	Logger              *slog.Logger
+	InitForClient       InitForClient
+	SessionCache        SessionCache
 	ElicitationMap      idmap.Map
 	ElicitationEnabled  bool
 	TokenElicitationMap elicitation.Map
 	initFlight          singleflight.Group
-	MaxRequestBodySize int
+	MaxRequestBodySize  int
 	//TODO this should not be needed
 	Broker broker.MCPBroker
 }
