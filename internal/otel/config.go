@@ -47,9 +47,22 @@ func (c *Config) LogsEndpoint() string {
 	return c.Endpoint
 }
 
+// MetricsEndpoint returns the endpoint for metrics, with signal-specific override support.
+func (c *Config) MetricsEndpoint() string {
+	if endpoint := env.GetString("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", ""); endpoint != "" {
+		return endpoint
+	}
+	return c.Endpoint
+}
+
 // TracesEnabled returns true if tracing is enabled
 func (c *Config) TracesEnabled() bool {
 	return c.TracesEndpoint() != ""
+}
+
+// MetricsEnabled returns true if metrics export is enabled
+func (c *Config) MetricsEnabled() bool {
+	return c.MetricsEndpoint() != ""
 }
 
 // LogsEnabled returns true if logs export is enabled
@@ -59,5 +72,5 @@ func (c *Config) LogsEnabled() bool {
 
 // Enabled returns true if any telemetry signal is enabled
 func (c *Config) Enabled() bool {
-	return c.TracesEnabled() || c.LogsEnabled()
+	return c.TracesEnabled() || c.LogsEnabled() || c.MetricsEnabled()
 }

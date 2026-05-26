@@ -42,6 +42,7 @@ func NewLogsProvider(ctx context.Context, config *Config) (*LogsProvider, error)
 	}, nil
 }
 
+//nolint:dupl // each signal's exporter uses different option types; structural similarity is unavoidable
 func newLogExporter(ctx context.Context, endpoint string, insecure bool) (sdklog.Exporter, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {

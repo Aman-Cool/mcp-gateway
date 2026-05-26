@@ -12,6 +12,24 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// Meter names for each component.
+const (
+	RouterMeterName  = "mcp-router"
+	BrokerMeterName  = "mcp-broker"
+	SessionMeterName = "mcp-session"
+)
+
+// Metric instrument names.
+const (
+	MetricRouterStreamsActive     = "mcp.router.stream.active"
+	MetricRouterSessionLookups    = "mcp.router.session.lookups"
+	MetricRouterBackendInits      = "mcp.router.session.inits"
+	MetricSessionOpDuration       = "mcp.session.op.duration"
+	MetricBrokerConnectionsActive = "mcp.broker.upstream.connections"
+	MetricBrokerToolFetchDuration = "mcp.broker.upstream.tool_fetch.duration"
+	MetricBrokerConfigReloads     = "mcp.broker.config.reloads"
+)
+
 // BrokerTracerName is the OpenTelemetry tracer name for the broker component.
 const BrokerTracerName = "mcp-broker"
 
@@ -48,6 +66,16 @@ func SetupOTelSDK(ctx context.Context, gitSHA, dirty, version string, logger *sl
 		shutdownFuncs = append(shutdownFuncs, traceProvider.Shutdown)
 		otel.SetTracerProvider(traceProvider.TracerProvider())
 		logger.Info("OpenTelemetry tracing enabled", "endpoint", config.TracesEndpoint())
+	}
+
+	if config.MetricsEnabled() {
+		metricsProvider, err := NewMetricsProvider(ctx, config)
+		if err != nil {
+			return shutdown, nil, err
+		}
+		shutdownFuncs = append(shutdownFuncs, metricsProvider.Shutdown)
+		otel.SetMeterProvider(metricsProvider.MeterProvider())
+		logger.Info("OpenTelemetry metrics enabled", "endpoint", config.MetricsEndpoint())
 	}
 
 	if config.LogsEnabled() {

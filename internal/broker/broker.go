@@ -15,10 +15,13 @@ import (
 	mcpv1alpha1 "github.com/Kuadrant/mcp-gateway/api/v1alpha1"
 	"github.com/Kuadrant/mcp-gateway/internal/broker/upstream"
 	"github.com/Kuadrant/mcp-gateway/internal/config"
+	mcpotel "github.com/Kuadrant/mcp-gateway/internal/otel"
 	"github.com/Kuadrant/mcp-gateway/internal/session"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 var _ config.Observer = &mcpBrokerImpl{}
@@ -112,6 +115,8 @@ type mcpBrokerImpl struct {
 
 	// tagsToolsRegistered tracks whether list_tags/filter_tools_by_tags are currently registered
 	tagsToolsRegistered atomic.Bool
+
+	configReloads metric.Int64Counter
 }
 
 // this ensures that mcpBrokerImpl implements the MCPBroker interface
@@ -272,10 +277,18 @@ func NewBroker(logger *slog.Logger, opts ...Option) MCPBroker {
 		mcpBkr.registerDiscoveryTools()
 	}
 
+	m := otel.GetMeterProvider().Meter(mcpotel.BrokerMeterName)
+	mcpBkr.configReloads, _ = m.Int64Counter(
+		mcpotel.MetricBrokerConfigReloads,
+		metric.WithDescription("total broker config reload events"),
+		metric.WithUnit("{reload}"),
+	)
+
 	return mcpBkr
 }
 
 func (m *mcpBrokerImpl) OnConfigChange(ctx context.Context, conf *config.MCPServersConfig) {
+	m.configReloads.Add(ctx, 1)
 	// Take a consistent snapshot before acquiring mcpLock; LoadConfig may be
 	// concurrently replacing conf.Servers/VirtualServers under its own write lock.
 	servers := conf.ListServers()

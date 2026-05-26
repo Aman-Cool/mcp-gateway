@@ -24,5 +24,6 @@ func (a *app) createRouter() {
 		ElicitationEnabled:  cfg.enableURLElicitation,
 	}
 
+	a.router.InitMetrics()
 	extProcV3.RegisterExternalProcessorServer(a.grpcServer, a.router)
 }

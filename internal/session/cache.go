@@ -9,11 +9,16 @@ import (
 	"time"
 
 	redis "github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const clientElicitationPrefix = "clientelicitation:"
 
 const userTokenFieldPrefix = "token:"
+
+const sessionMeterName = "mcp-session"
 
 // Cache implements a cache
 type Cache struct {
@@ -21,6 +26,17 @@ type Cache struct {
 	innerMu       sync.Mutex // serializes copy-on-write mutations on inner map[string]string values
 	extClient     *redis.Client
 	encryptionKey []byte
+	opDuration    metric.Float64Histogram
+}
+
+// recordOp records the duration of a Redis operation. No-op for in-memory caches.
+func (c *Cache) recordOp(ctx context.Context, op string, start time.Time) {
+	if c.opDuration == nil {
+		return
+	}
+	c.opDuration.Record(ctx, time.Since(start).Seconds(),
+		metric.WithAttributes(attribute.String("op", op)),
+	)
 }
 
 // KeyExists checks if a key exists in the cache
@@ -49,7 +65,10 @@ func (c *Cache) GetSession(ctx context.Context, key string) (map[string]string, 
 		}
 		return map[string]string{}, nil
 	}
-	return c.extClient.HGetAll(ctx, key).Result()
+	start := time.Now()
+	result, err := c.extClient.HGetAll(ctx, key).Result()
+	c.recordOp(ctx, "get_session", start)
+	return result, err
 }
 
 // DeleteSessions deletes sessions and associated metadata from the cache
@@ -88,12 +107,15 @@ func (c *Cache) AddSession(ctx context.Context, key, mcpServerID, mcpSession str
 		c.inmemory.Store(key, next)
 		return true, nil
 	}
+	start := time.Now()
 	pipe := c.extClient.Pipeline()
 	pipe.HSet(ctx, key, mcpServerID, mcpSession)
 	if ttl > 0 {
 		pipe.Expire(ctx, key, ttl)
 	}
-	if _, err := pipe.Exec(ctx); err != nil {
+	_, err := pipe.Exec(ctx)
+	c.recordOp(ctx, "add_session", start)
+	if err != nil {
 		return false, err
 	}
 	return true, nil
@@ -125,7 +147,10 @@ func (c *Cache) SetClientElicitation(ctx context.Context, gatewaySessionID strin
 		c.inmemory.Store(key, true)
 		return nil
 	}
-	return c.extClient.Set(ctx, key, "1", ttl).Err()
+	start := time.Now()
+	err := c.extClient.Set(ctx, key, "1", ttl).Err()
+	c.recordOp(ctx, "set_elicitation", start)
+	return err
 }
 
 // GetClientElicitation returns whether the client for this gateway session supports elicitation
@@ -135,7 +160,9 @@ func (c *Cache) GetClientElicitation(ctx context.Context, gatewaySessionID strin
 		_, ok := c.inmemory.Load(key)
 		return ok, nil
 	}
+	start := time.Now()
 	val, err := c.extClient.Get(ctx, key).Result()
+	c.recordOp(ctx, "get_elicitation", start)
 	if errors.Is(err, redis.Nil) {
 		return false, nil
 	}
@@ -247,6 +274,13 @@ func NewCache(opts ...func(*Cache)) (*Cache, error) {
 		opt(c)
 	}
 	if c.extClient != nil {
+		m := otel.GetMeterProvider().Meter(sessionMeterName)
+		c.opDuration, _ = m.Float64Histogram(
+			"mcp.session.op.duration",
+			metric.WithDescription("duration of Redis session store operations"),
+			metric.WithUnit("s"),
+			metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+		)
 		return c, nil
 	}
 	c.inmemory = &sync.Map{}

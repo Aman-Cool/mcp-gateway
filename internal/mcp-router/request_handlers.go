@@ -17,6 +17,7 @@ import (
 	eppb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -536,6 +537,11 @@ func (s *ExtProcServer) routeToUpstream(ctx context.Context, span trace.Span, mc
 	if id, ok := exists[mcpReq.serverName]; ok {
 		s.Logger.DebugContext(ctx, "found session in cache", "session id", mcpReq.GetSessionID(), "for server", serverInfo.Name, "remote session", id)
 		remoteMCPServerSession = id
+		if s.sessionLookups != nil {
+			s.sessionLookups.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "hit")))
+		}
+	} else if s.sessionLookups != nil {
+		s.sessionLookups.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "miss")))
 	}
 	if remoteMCPServerSession == "" {
 		id, err := s.initializeMCPServerSession(ctx, mcpReq)
@@ -825,6 +831,9 @@ func (s *ExtProcServer) initializeMCPServerSession(ctx context.Context, mcpReq *
 		}
 		// arm the cleanup timer only after the session is safely recorded in the cache
 		time.AfterFunc(ttl, sessionCloser)
+		if s.backendInits != nil {
+			s.backendInits.Add(ctx, 1)
+		}
 		return remoteSessionID, nil
 	})
 	if err != nil {

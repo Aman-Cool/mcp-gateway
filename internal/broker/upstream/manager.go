@@ -22,6 +22,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -161,6 +162,9 @@ type MCPManager struct {
 	promptEvents chan struct{}
 	done         chan struct{} // closed when the event loop exits
 	status       ServerValidationStatus
+
+	connectionsActive metric.Int64UpDownCounter
+	toolFetchDuration metric.Float64Histogram
 }
 
 // DefaultTickerInterval is the default interval for backend health checks
@@ -185,6 +189,19 @@ func NewUpstreamMCPManager(upstream MCP, gatewayServer ToolsAdderDeleter, prompt
 		Cap:      tickerInterval,
 	}
 
+	m := otel.GetMeterProvider().Meter(mcpotel.BrokerMeterName)
+	connectionsActive, _ := m.Int64UpDownCounter(
+		mcpotel.MetricBrokerConnectionsActive,
+		metric.WithDescription("number of active upstream MCP server connections"),
+		metric.WithUnit("{connection}"),
+	)
+	toolFetchDuration, _ := m.Float64Histogram(
+		mcpotel.MetricBrokerToolFetchDuration,
+		metric.WithDescription("time taken to fetch tools from an upstream MCP server"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+	)
+
 	return &MCPManager{
 		mcp:               upstream,
 		gatewayServer:     gatewayServer,
@@ -204,6 +221,8 @@ func NewUpstreamMCPManager(upstream MCP, gatewayServer ToolsAdderDeleter, prompt
 		promptsMap:        map[string]*mcp.Prompt{},
 		servedPromptsMap:  map[string]*mcp.Prompt{},
 		serverPrompts:     []server.ServerPrompt{},
+		connectionsActive: connectionsActive,
+		toolFetchDuration: toolFetchDuration,
 	}, nil
 }
 
@@ -218,6 +237,7 @@ func (man *MCPManager) MCPName() string {
 func (man *MCPManager) Start(ctx context.Context) ActiveMCPServer {
 	ctx, cancel := context.WithCancel(ctx)
 	man.ticker.Reset(man.tickerInterval)
+	man.connectionsActive.Add(ctx, 1, metric.WithAttributes(attribute.String("mcp.server", man.mcp.GetName())))
 
 	go func() {
 		man.manage(ctx, eventTypeTimer)
@@ -258,7 +278,11 @@ type activeMCP struct {
 	cancel  context.CancelFunc
 }
 
-func (a *activeMCP) Stop()                             { a.cancel(); <-a.manager.done }
+func (a *activeMCP) Stop() {
+	a.manager.connectionsActive.Add(context.Background(), -1, metric.WithAttributes(attribute.String("mcp.server", a.manager.mcp.GetName())))
+	a.cancel()
+	<-a.manager.done
+}
 func (a *activeMCP) MCPName() string                   { return a.manager.MCPName() }
 func (a *activeMCP) GetStatus() ServerValidationStatus { return a.manager.GetStatus() }
 func (a *activeMCP) GetManagedTools() []mcp.Tool       { return a.manager.GetManagedTools() }
@@ -361,13 +385,17 @@ func (man *MCPManager) manage(ctx context.Context, event eventType) {
 		return
 	}
 
+	serverAttr := metric.WithAttributes(attribute.String("mcp.server", man.mcp.GetName()))
+
 	var toolErr error
 	var invalidTools []InvalidToolInfo
 	if !man.shouldFetchTools(event) {
 		man.logger.DebugContext(ctx, "not fetching tools", "event", event, "upstream mcp server", man.mcp.ID(), "waiting for notification", notificationToolsListChanged)
 	} else {
 		man.logger.DebugContext(ctx, "fetching tools", "upstream mcp server", man.mcp.ID())
+		fetchStart := time.Now()
 		current, fetched, err := man.getTools(ctx)
+		man.toolFetchDuration.Record(ctx, time.Since(fetchStart).Seconds(), serverAttr)
 		if err != nil {
 			toolErr = fmt.Errorf("upstream mcp failed to list tools server %s : %w", man.mcp.ID(), err)
 			man.recordBackendError(span, toolErr)

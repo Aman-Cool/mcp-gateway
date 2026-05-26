@@ -14,10 +14,13 @@ import (
 	"github.com/Kuadrant/mcp-gateway/internal/config"
 	"github.com/Kuadrant/mcp-gateway/internal/elicitation"
 	"github.com/Kuadrant/mcp-gateway/internal/idmap"
+	mcpotel "github.com/Kuadrant/mcp-gateway/internal/otel"
 	"github.com/Kuadrant/mcp-gateway/internal/session"
 	extProcV3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/mark3labs/mcp-go/client"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 )
@@ -59,6 +62,31 @@ type ExtProcServer struct {
 	// initGroup serializes backend session initialization per (gatewaySessionID, serverName)
 	// pair, preventing concurrent tool calls from creating duplicate backend sessions.
 	initGroup singleflight.Group
+
+	streamsActive  metric.Int64UpDownCounter
+	sessionLookups metric.Int64Counter
+	backendInits   metric.Int64Counter
+}
+
+// InitMetrics initialises metric instruments from the global MeterProvider.
+// Must be called after otel.SetMeterProvider has been set (i.e. after SetupOTelSDK).
+func (s *ExtProcServer) InitMetrics() {
+	m := otel.GetMeterProvider().Meter(mcpotel.RouterMeterName)
+	s.streamsActive, _ = m.Int64UpDownCounter(
+		mcpotel.MetricRouterStreamsActive,
+		metric.WithDescription("number of active ext_proc gRPC streams"),
+		metric.WithUnit("{stream}"),
+	)
+	s.sessionLookups, _ = m.Int64Counter(
+		mcpotel.MetricRouterSessionLookups,
+		metric.WithDescription("total session cache lookups"),
+		metric.WithUnit("{lookup}"),
+	)
+	s.backendInits, _ = m.Int64Counter(
+		mcpotel.MetricRouterBackendInits,
+		metric.WithDescription("total backend session initialisations (hairpin requests)"),
+		metric.WithUnit("{init}"),
+	)
 }
 
 // OnConfigChange is used to register the router for config changes
@@ -78,6 +106,10 @@ func (s *ExtProcServer) Process(stream extProcV3.ExternalProcessor_ProcessServer
 		rewriter            *sseRewriter // nil until a tool call response arrives
 		bodyBuffer          []byte
 	)
+	if s.streamsActive != nil {
+		s.streamsActive.Add(ctx, 1)
+		defer s.streamsActive.Add(ctx, -1)
+	}
 	span := trace.SpanFromContext(ctx)
 	defer func() { span.End() }()
 	// ensure orphaned elicitation idmap entries are cleaned up on any exit path
