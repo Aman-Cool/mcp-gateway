@@ -190,17 +190,23 @@ func NewUpstreamMCPManager(upstream MCP, gatewayServer ToolsAdderDeleter, prompt
 	}
 
 	m := otel.GetMeterProvider().Meter(mcpotel.BrokerMeterName)
-	connectionsActive, _ := m.Int64UpDownCounter(
+	connectionsActive, err := m.Int64UpDownCounter(
 		mcpotel.MetricBrokerConnectionsActive,
 		metric.WithDescription("number of active upstream MCP server connections"),
 		metric.WithUnit("{connection}"),
 	)
-	toolFetchDuration, _ := m.Float64Histogram(
+	if err != nil {
+		logger.Error("failed to create connections active counter", "error", err)
+	}
+	toolFetchDuration, err := m.Float64Histogram(
 		mcpotel.MetricBrokerToolFetchDuration,
 		metric.WithDescription("time taken to fetch tools from an upstream MCP server"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 	)
+	if err != nil {
+		logger.Error("failed to create tool fetch duration histogram", "error", err)
+	}
 
 	return &MCPManager{
 		mcp:               upstream,

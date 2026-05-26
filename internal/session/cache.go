@@ -275,12 +275,15 @@ func NewCache(opts ...func(*Cache)) (*Cache, error) {
 	}
 	if c.extClient != nil {
 		m := otel.GetMeterProvider().Meter(sessionMeterName)
-		c.opDuration, _ = m.Float64Histogram(
+		var err error
+		if c.opDuration, err = m.Float64Histogram(
 			"mcp.session.op.duration",
 			metric.WithDescription("duration of Redis session store operations"),
 			metric.WithUnit("s"),
 			metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
-		)
+		); err != nil {
+			return nil, fmt.Errorf("failed to create session op duration histogram: %w", err)
+		}
 		return c, nil
 	}
 	c.inmemory = &sync.Map{}

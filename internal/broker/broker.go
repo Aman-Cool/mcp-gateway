@@ -278,11 +278,14 @@ func NewBroker(logger *slog.Logger, opts ...Option) MCPBroker {
 	}
 
 	m := otel.GetMeterProvider().Meter(mcpotel.BrokerMeterName)
-	mcpBkr.configReloads, _ = m.Int64Counter(
+	var mErr error
+	if mcpBkr.configReloads, mErr = m.Int64Counter(
 		mcpotel.MetricBrokerConfigReloads,
 		metric.WithDescription("total broker config reload events"),
 		metric.WithUnit("{reload}"),
-	)
+	); mErr != nil {
+		logger.Error("failed to create config reloads counter", "error", mErr)
+	}
 
 	return mcpBkr
 }

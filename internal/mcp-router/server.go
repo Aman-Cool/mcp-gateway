@@ -63,30 +63,42 @@ type ExtProcServer struct {
 	// pair, preventing concurrent tool calls from creating duplicate backend sessions.
 	initGroup singleflight.Group
 
-	streamsActive  metric.Int64UpDownCounter
-	sessionLookups metric.Int64Counter
-	backendInits   metric.Int64Counter
+	streamsActive    metric.Int64UpDownCounter
+	sessionLookups   metric.Int64Counter
+	backendInits     metric.Int64Counter
+	sessionHitOpt    metric.AddOption
+	sessionMissOpt   metric.AddOption
 }
 
 // InitMetrics initialises metric instruments from the global MeterProvider.
 // Must be called after otel.SetMeterProvider has been set (i.e. after SetupOTelSDK).
 func (s *ExtProcServer) InitMetrics() {
 	m := otel.GetMeterProvider().Meter(mcpotel.RouterMeterName)
-	s.streamsActive, _ = m.Int64UpDownCounter(
+	var err error
+	if s.streamsActive, err = m.Int64UpDownCounter(
 		mcpotel.MetricRouterStreamsActive,
 		metric.WithDescription("number of active ext_proc gRPC streams"),
 		metric.WithUnit("{stream}"),
-	)
-	s.sessionLookups, _ = m.Int64Counter(
+	); err != nil {
+		s.Logger.Error("failed to create streams active counter", "error", err)
+	}
+	if s.sessionLookups, err = m.Int64Counter(
 		mcpotel.MetricRouterSessionLookups,
 		metric.WithDescription("total session cache lookups"),
 		metric.WithUnit("{lookup}"),
-	)
-	s.backendInits, _ = m.Int64Counter(
+	); err != nil {
+		s.Logger.Error("failed to create session lookups counter", "error", err)
+	}
+	if s.backendInits, err = m.Int64Counter(
 		mcpotel.MetricRouterBackendInits,
 		metric.WithDescription("total backend session initialisations (hairpin requests)"),
 		metric.WithUnit("{init}"),
-	)
+	); err != nil {
+		s.Logger.Error("failed to create backend inits counter", "error", err)
+	}
+	// precompute to avoid per-request allocations on the hot path
+	s.sessionHitOpt = metric.WithAttributes(attribute.String("result", "hit"))
+	s.sessionMissOpt = metric.WithAttributes(attribute.String("result", "miss"))
 }
 
 // OnConfigChange is used to register the router for config changes

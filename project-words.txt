@@ -304,6 +304,7 @@ otlploghttp
 otlpmetric
 otlpmetricgrpc
 otlpmetrichttp
+sdkmetric
 otlptrace
 otlptracegrpc
 otlptracehttp
