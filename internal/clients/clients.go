@@ -32,7 +32,7 @@ func buildHairpinURL(gatewayHost, mcpPath string) string {
 // Initialize will create a new initialize and initialized request and return the associated http client for connection management
 // This method makes a request back to the gateway setting the target mcp server to initialize. We hairpin through the gateway to ensure any Auth applied to that host is triggered for the call.
 // The initToken is a short-lived JWT bound to conf.Hostname that the router will validate when the hairpin request re-enters the gateway.
-func Initialize(ctx context.Context, gatewayHost, initToken string, conf *config.MCPServer, passThroughHeaders map[string]string, clientElicitation bool) (*client.Client, error) {
+func Initialize(ctx context.Context, gatewayHost, initToken string, conf *config.MCPServer, passThroughHeaders map[string]string, clientElicitation bool) (mcprouter.MCPClientHandle, error) {
 	// force the initialize to hairpin back through envoy with a token that
 	// proves the request originated from the gateway's own router.
 	passThroughHeaders[mcprouter.RoutingKey] = initToken

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"k8s.io/utils/ptr"
@@ -19,7 +20,6 @@ import (
 	"github.com/Kuadrant/mcp-gateway/internal/idmap"
 	"github.com/Kuadrant/mcp-gateway/internal/session"
 	eppb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
-	"github.com/mark3labs/mcp-go/client"
 	"github.com/stretchr/testify/require"
 )
 
@@ -181,7 +181,7 @@ func TestHandleRequestBody(t *testing.T) {
 	require.True(t, sessionAdded)
 
 	// Mock InitForClient - should not be called since session exists
-	mockInitForClient := func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (*client.Client, error) {
+	mockInitForClient := func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (MCPClientHandle, error) {
 		// This should not be called in this test since session exists in cache
 		return nil, fmt.Errorf("InitForClient should not be called when session exists")
 	}
@@ -1209,7 +1209,7 @@ func TestInitializeMCPSeverSession_PassThroughHeaders(t *testing.T) {
 	require.NoError(t, err)
 
 	var captured map[string]string
-	mockInitForClient := func(_ context.Context, _, _ string, _ *config.MCPServer, headers map[string]string, _ bool) (*client.Client, error) {
+	mockInitForClient := func(_ context.Context, _, _ string, _ *config.MCPServer, headers map[string]string, _ bool) (MCPClientHandle, error) {
 		captured = make(map[string]string, len(headers))
 		for k, v := range headers {
 			captured[k] = v
@@ -1429,7 +1429,7 @@ func TestHandlePromptGet(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, sessionAdded)
 
-	mockInitForClient := func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (*client.Client, error) {
+	mockInitForClient := func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (MCPClientHandle, error) {
 		return nil, fmt.Errorf("InitForClient should not be called when session exists")
 	}
 
@@ -1532,7 +1532,7 @@ func setupTokenResolutionTestServer(t *testing.T, serverConfigs []*config.MCPSer
 		JWTManager:   jwtManager,
 		Logger:       logger,
 		SessionCache: cache,
-		InitForClient: func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (*client.Client, error) {
+		InitForClient: func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (MCPClientHandle, error) {
 			return nil, fmt.Errorf("should not be called")
 		},
 		Broker:              newMockBroker(serverConfigs, toolMap),
@@ -1829,4 +1829,122 @@ func extractSSEData(t *testing.T, sse string) string {
 		return rest
 	}
 	return rest[:end]
+}
+
+// mockClientHandle implements MCPClientHandle for unit testing without a real MCP connection.
+type mockClientHandle struct {
+	sessionID   string
+	closeCalled *bool
+}
+
+func (m *mockClientHandle) GetSessionId() string { return m.sessionID } //nolint:revive // name matches mcp-go interface
+func (m *mockClientHandle) Close() error {
+	if m.closeCalled != nil {
+		*m.closeCalled = true
+	}
+	return nil
+}
+
+// errAddSessionCache wraps session.Cache and forces AddSession to return an error.
+type errAddSessionCache struct {
+	*session.Cache
+}
+
+func (e *errAddSessionCache) AddSession(_ context.Context, _, _, _ string, _ time.Duration) (bool, error) {
+	return false, fmt.Errorf("redis write failed")
+}
+
+func newInitSessionServer(t *testing.T, cache SessionCache) (*ExtProcServer, string) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	realCache, err := session.NewCache()
+	require.NoError(t, err)
+	if cache == nil {
+		cache = realCache
+	}
+	jwtManager, err := session.NewJWTManager("test-signing-key", 0, logger, realCache)
+	require.NoError(t, err)
+	validToken := jwtManager.Generate()
+	return &ExtProcServer{
+		RoutingConfig: &config.MCPServersConfig{
+			Servers: []*config.MCPServer{
+				{
+					Name:     "test-server",
+					URL:      "http://test.mcp:8080/mcp",
+					Hostname: "test.mcp",
+				},
+			},
+			MCPGatewayInternalHostname: "mcp-gateway.local",
+		},
+		JWTManager:   jwtManager,
+		Logger:       logger,
+		SessionCache: cache,
+		Broker:       newMockBroker(nil, map[string]string{}),
+	}, validToken
+}
+
+func makeToolCallReq(token, serverName string) *MCPRequest {
+	return &MCPRequest{
+		ID:         1,
+		JSONRPC:    "2.0",
+		Method:     "tools/call",
+		serverName: serverName,
+		Params:     map[string]any{"name": "some_tool"},
+		Headers: &corev3.HeaderMap{
+			Headers: []*corev3.HeaderValue{
+				{Key: "mcp-session-id", RawValue: []byte(token)},
+			},
+		},
+	}
+}
+
+func TestInitializeMCPSeverSession_HappyPath(t *testing.T) {
+	baseCache, err := session.NewCache()
+	require.NoError(t, err)
+	srv, token := newInitSessionServer(t, baseCache)
+
+	const remoteSession = "remote-upstream-session-abc"
+	srv.InitForClient = func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (MCPClientHandle, error) {
+		return &mockClientHandle{sessionID: remoteSession}, nil
+	}
+
+	id, err := srv.initializeMCPSeverSession(context.Background(), makeToolCallReq(token, "test-server"))
+	require.NoError(t, err)
+	require.Equal(t, remoteSession, id)
+
+	// verify the session was written to the cache
+	stored, err := baseCache.GetSession(context.Background(), token)
+	require.NoError(t, err)
+	require.Equal(t, remoteSession, stored["test-server"])
+}
+
+func TestInitializeMCPSeverSession_InitForClientError(t *testing.T) {
+	srv, token := newInitSessionServer(t, nil)
+	srv.InitForClient = func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (MCPClientHandle, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+
+	_, err := srv.initializeMCPSeverSession(context.Background(), makeToolCallReq(token, "test-server"))
+	require.Error(t, err)
+	var routerErr *RouterError
+	require.ErrorAs(t, err, &routerErr)
+	require.Equal(t, int32(500), routerErr.Code())
+}
+
+func TestInitializeMCPSeverSession_AddSessionError(t *testing.T) {
+	baseCache, err := session.NewCache()
+	require.NoError(t, err)
+	srv, token := newInitSessionServer(t, &errAddSessionCache{Cache: baseCache})
+
+	var closeCalled bool
+	srv.InitForClient = func(_ context.Context, _, _ string, _ *config.MCPServer, _ map[string]string, _ bool) (MCPClientHandle, error) {
+		return &mockClientHandle{sessionID: "remote-session-xyz", closeCalled: &closeCalled}, nil
+	}
+
+	_, err = srv.initializeMCPSeverSession(context.Background(), makeToolCallReq(token, "test-server"))
+	require.Error(t, err)
+	var routerErr *RouterError
+	require.ErrorAs(t, err, &routerErr)
+	require.Equal(t, int32(500), routerErr.Code())
+	require.True(t, closeCalled, "client handle must be closed when AddSession fails")
 }

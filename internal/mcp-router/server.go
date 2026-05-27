@@ -15,7 +15,6 @@ import (
 	"github.com/Kuadrant/mcp-gateway/internal/idmap"
 	"github.com/Kuadrant/mcp-gateway/internal/session"
 	extProcV3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
-	"github.com/mark3labs/mcp-go/client"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
@@ -37,10 +36,16 @@ type SessionCache interface {
 	DeleteUserToken(ctx context.Context, sessionID, serverName string) error
 }
 
+// MCPClientHandle represents a subset of a live client connection the router needs after init.
+type MCPClientHandle interface {
+	GetSessionId() string
+	Close() error
+}
+
 // InitForClient defines a function for initializing an MCP server for a client.
 // initToken is a short-lived JWT minted by the router and validated again when
 // the hairpin request re-enters the gateway.
-type InitForClient func(ctx context.Context, gatewayHost, initToken string, conf *config.MCPServer, passThroughHeaders map[string]string, clientElicitation bool) (*client.Client, error)
+type InitForClient func(ctx context.Context, gatewayHost, initToken string, conf *config.MCPServer, passThroughHeaders map[string]string, clientElicitation bool) (MCPClientHandle, error)
 
 // ExtProcServer struct boolean for streaming & Store headers for later use in body processing
 type ExtProcServer struct {
