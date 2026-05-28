@@ -161,6 +161,17 @@ spec:
                 - Enabled
                 - Disabled
                 type: string
+              tags:
+                description: |-
+                  tags is an optional list of arbitrary labels for this MCP server.
+                  Tags are propagated to the broker and exposed via the gateway's list_tags and filter_tools_by_tags tools.
+                items:
+                  maxLength: 128
+                  minLength: 1
+                  type: string
+                maxItems: 10
+                type: array
+                x-kubernetes-list-type: atomic
               targetRef:
                 description: |-
                   targetRef specifies an HTTPRoute that points to a backend MCP server.
