@@ -399,16 +399,23 @@ func (m *mcpBrokerImpl) GetServerInfo(tool string) (*config.MCPServer, error) {
 		}
 	}
 
-	// userSpecificList servers don't cache tools, so match by prefix
+	// userSpecificList servers don't cache tools, so match by longest prefix
+	var bestMatch *config.MCPServer
 	for _, upstream := range m.mcpServers {
 		cfg := upstream.Config()
 		if cfg.UserSpecificList && cfg.Prefix != "" && strings.HasPrefix(tool, cfg.Prefix) {
-			m.logger.Debug("matched user-specific server by prefix",
-				"toolName", tool,
-				"serverPrefix", cfg.Prefix,
-				"serverName", cfg.Name)
-			return &cfg, nil
+			if bestMatch == nil || len(cfg.Prefix) > len(bestMatch.Prefix) {
+				cfgCopy := cfg
+				bestMatch = &cfgCopy
+			}
 		}
+	}
+	if bestMatch != nil {
+		m.logger.Debug("matched user-specific server by prefix",
+			"toolName", tool,
+			"serverPrefix", bestMatch.Prefix,
+			"serverName", bestMatch.Name)
+		return bestMatch, nil
 	}
 
 	return nil, fmt.Errorf("tool name %q doesn't match any configured server", tool)
