@@ -11,11 +11,7 @@ import (
 
 // FilterResources reduces the resource set based on authorization headers.
 func (broker *mcpBrokerImpl) FilterResources(ctx context.Context, _ any, mcpReq *mcp.ListResourcesRequest, mcpRes *mcp.ListResourcesResult) {
-	attrs := []attribute.KeyValue{brokerComponentAttr}
-	if sid := sessionIDFromContext(ctx); sid != "" {
-		attrs = append(attrs, attribute.String("mcp.session.id", sid))
-	}
-	ctx, span := brokerTracer().Start(ctx, "mcp-broker.resources-list", trace.WithAttributes(attrs...))
+	ctx, span := brokerTracer().Start(ctx, "mcp-broker.resources-list", trace.WithAttributes(broker.filterSpanAttrs(ctx)...))
 	defer span.End()
 
 	broker.logger.DebugContext(ctx, "FilterResources called", "input_resources_count", len(mcpRes.Resources))

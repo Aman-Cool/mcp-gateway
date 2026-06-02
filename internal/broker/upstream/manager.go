@@ -865,72 +865,73 @@ func (man *MCPManager) getPrompts(ctx context.Context) ([]mcp.Prompt, []mcp.Prom
 	return prompts, res.Prompts, nil
 }
 
+// checkConflicts returns an error if any of newKeys already exist in the gateway registered
+// by a different upstream server. existing maps each registered key to the server ID that owns it.
+func (man *MCPManager) checkConflicts(newKeys []string, existing map[string]string, itemType string) error {
+	var conflicting []string
+	for _, key := range newKeys {
+		if ownerID, ok := existing[key]; ok && ownerID != string(man.mcp.ID()) {
+			conflicting = append(conflicting, key)
+		}
+	}
+	if len(conflicting) > 0 {
+		return fmt.Errorf("conflicting %ss discovered. conflicting %s names %v", itemType, itemType, conflicting)
+	}
+	return nil
+}
+
+// extractRegisteredServerIDs builds a key→serverID map from a set of registered item metas.
+// Items with missing or invalid meta are logged (keyed by logLabel) and skipped.
+func (man *MCPManager) extractRegisteredServerIDs(metaByKey map[string]*mcp.Meta, logLabel string) map[string]string {
+	result := make(map[string]string, len(metaByKey))
+	for key, meta := range metaByKey {
+		if meta == nil || meta.AdditionalFields == nil {
+			man.logger.Error("unable to check conflict, meta is nil", "upstream mcp server", man.mcp.ID(), logLabel, key)
+			continue
+		}
+		rawID, ok := meta.AdditionalFields[gatewayServerID]
+		if !ok {
+			man.logger.Error("unable to check conflict, id is missing", "upstream mcp server", man.mcp.ID(), logLabel, key)
+			continue
+		}
+		id, is := rawID.(string)
+		if !is {
+			man.logger.Error("unable to check conflict, id is not a string", "upstream mcp server", man.mcp.ID(), logLabel, key, "type", reflect.TypeOf(rawID))
+			continue
+		}
+		result[key] = id
+	}
+	return result
+}
+
 func (man *MCPManager) findPromptConflicts(mcpPrompts []server.ServerPrompt) error {
 	if man.promptsServer == nil {
 		return nil
 	}
-	gatewayServerPrompts := man.promptsServer.ListPrompts()
-	var conflictingPromptNames []string
-	for _, prompt := range mcpPrompts {
-		for existingPromptName, existingPromptInfo := range gatewayServerPrompts {
-			existingPrompt := existingPromptInfo.Prompt
-			if existingPrompt.Meta == nil || existingPrompt.Meta.AdditionalFields == nil {
-				man.logger.Error("unable to check conflict, prompt meta is nil", "upstream mcp server", man.mcp.ID(), "prompt", existingPromptName)
-				continue
-			}
-			existingPromptID, ok := existingPrompt.Meta.AdditionalFields[gatewayServerID]
-			if !ok {
-				man.logger.Error("unable to check conflict, prompt id is missing", "upstream mcp server", man.mcp.ID())
-				continue
-			}
-			promptID, is := existingPromptID.(string)
-			if !is {
-				man.logger.Error("unable to check conflict, prompt id is not a string", "upstream mcp server", man.mcp.ID(), "type", reflect.TypeOf(existingPromptID))
-				continue
-			}
-			if existingPromptName == prompt.Prompt.Name && promptID != string(man.mcp.ID()) {
-				conflictingPromptNames = append(conflictingPromptNames, prompt.Prompt.Name)
-			}
-		}
+	metas := make(map[string]*mcp.Meta, len(mcpPrompts))
+	for name, info := range man.promptsServer.ListPrompts() {
+		metas[name] = info.Prompt.Meta
 	}
-	if len(conflictingPromptNames) > 0 {
-		return fmt.Errorf("conflicting prompts discovered. conflicting prompt names %v", conflictingPromptNames)
+	newKeys := make([]string, 0, len(mcpPrompts))
+	for _, p := range mcpPrompts {
+		newKeys = append(newKeys, p.Prompt.Name)
 	}
-	return nil
+	return man.checkConflicts(newKeys, man.extractRegisteredServerIDs(metas, "prompt"), "prompt")
 }
 
 func (man *MCPManager) findResourceConflicts(mcpResources []server.ServerResource) error {
 	if man.resourcesServer == nil {
 		return nil
 	}
-	gatewayServerResources := man.resourcesServer.ListResources()
-	var conflictingURIs []string
-	for _, resource := range mcpResources {
-		for existingURI, existingResourceInfo := range gatewayServerResources {
-			existingResource := existingResourceInfo.Resource
-			if existingResource.Meta == nil || existingResource.Meta.AdditionalFields == nil {
-				man.logger.Error("unable to check conflict, resource meta is nil", "upstream mcp server", man.mcp.ID(), "uri", existingURI)
-				continue
-			}
-			existingResourceID, ok := existingResource.Meta.AdditionalFields[gatewayServerID]
-			if !ok {
-				man.logger.Error("unable to check conflict, resource id is missing", "upstream mcp server", man.mcp.ID())
-				continue
-			}
-			resourceID, is := existingResourceID.(string)
-			if !is {
-				man.logger.Error("unable to check conflict, resource id is not a string", "upstream mcp server", man.mcp.ID(), "type", reflect.TypeOf(existingResourceID))
-				continue
-			}
-			if existingURI == resource.Resource.URI && resourceID != string(man.mcp.ID()) {
-				conflictingURIs = append(conflictingURIs, resource.Resource.URI)
-			}
-		}
+	metas := make(map[string]*mcp.Meta)
+	for uri, info := range man.resourcesServer.ListResources() {
+		metas[uri] = info.Resource.Meta
 	}
-	if len(conflictingURIs) > 0 {
-		return fmt.Errorf("conflicting resources discovered. conflicting URIs %v", conflictingURIs)
+	newKeys := make([]string, 0, len(mcpResources))
+	for _, r := range mcpResources {
+		newKeys = append(newKeys, r.Resource.URI)
 	}
-	return nil
+	return man.checkConflicts(newKeys, man.extractRegisteredServerIDs(metas, "resource"), "resource")
 }
 
 // GetManagedPrompts returns a copy of all prompts discovered from the upstream server.

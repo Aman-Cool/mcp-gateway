@@ -22,6 +22,15 @@ var virtualMCPHeader = http.CanonicalHeaderKey("x-mcp-virtualserver")
 
 const allowedCapabilitiesClaimKey = "allowed-capabilities"
 
+// filterSpanAttrs returns the base OTel attributes for a list-filter span, appending the session ID if present.
+func (broker *mcpBrokerImpl) filterSpanAttrs(ctx context.Context) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{brokerComponentAttr}
+	if sid := sessionIDFromContext(ctx); sid != "" {
+		attrs = append(attrs, attribute.String("mcp.session.id", sid))
+	}
+	return attrs
+}
+
 // FilterTools reduces the tool set based on authorization headers.
 // Priority: x-mcp-authorized JWT filtering, then x-mcp-virtualserver filtering.
 func (broker *mcpBrokerImpl) FilterTools(ctx context.Context, _ any, mcpReq *mcp.ListToolsRequest, mcpRes *mcp.ListToolsResult) {

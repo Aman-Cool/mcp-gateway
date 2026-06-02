@@ -13,11 +13,7 @@ import (
 
 // FilterPrompts reduces the prompt set based on authorization headers.
 func (broker *mcpBrokerImpl) FilterPrompts(ctx context.Context, _ any, mcpReq *mcp.ListPromptsRequest, mcpRes *mcp.ListPromptsResult) {
-	attrs := []attribute.KeyValue{brokerComponentAttr}
-	if sid := sessionIDFromContext(ctx); sid != "" {
-		attrs = append(attrs, attribute.String("mcp.session.id", sid))
-	}
-	ctx, span := brokerTracer().Start(ctx, "mcp-broker.prompts-list", trace.WithAttributes(attrs...))
+	ctx, span := brokerTracer().Start(ctx, "mcp-broker.prompts-list", trace.WithAttributes(broker.filterSpanAttrs(ctx)...))
 	defer span.End()
 
 	broker.logger.DebugContext(ctx, "FilterPrompts called", "input_prompts_count", len(mcpRes.Prompts))
