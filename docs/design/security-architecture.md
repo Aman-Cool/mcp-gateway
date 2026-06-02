@@ -41,11 +41,13 @@ MCP Client
 └──────────┬──────────────────────┬────────────┘
            │                      │
            ▼                      ▼
-   ┌──────────────┐     ┌──────────────────┐
-   │  MCP Broker  │     │  Upstream MCP    │
-   │  (internal/  │     │  Servers         │
-   │  broker/)    │     │  (tools/call)    │
-   └──────────────┘     └──────────────────┘
+   ┌──────────────────┐     ┌──────────────────┐
+   │  MCP Broker      │     │  Upstream MCP    │
+   │  (internal/      │     │  Servers         │
+   │  broker/)        │     │  (tools/call)    │
+   │  tools/list,     │     └──────────────────┘
+   │  initialize      │
+   └──────────────────┘
 ```
 
 ### Data crossing each boundary
@@ -88,7 +90,7 @@ The gateway is NOT responsible for:
 
 - The router (`internal/mcp-router/`) never accesses `credentialRef` values; it only reads routing headers and the JSON-RPC method/tool name from the request body
 - The broker (`internal/broker/`) never writes `credentialRef` values to client-facing responses, logs, or headers forwarded through Envoy
-- The controller (`internal/controller/`) scopes generated Secrets to the operator namespace and sets owner references for garbage collection. The controller's ClusterRole grants cluster-wide secrets access, but the informer cache is filtered by label (`mcp.kuadrant.io/aggregated=true`) to limit the working set
+- The controller (`internal/controller/`) scopes generated Secrets to the operator namespace and sets owner references for garbage collection. The controller's ClusterRole grants cluster-wide secrets access, but the informer cache is filtered by label (`mcp.kuadrant.io/secret: "true"`) to limit the working set
 - Routing headers set by the router (tool name, session ID, server name) are derived from parsed JSON-RPC bodies or gateway-issued JWTs, not from raw client input. Client-supplied headers are proxied through to upstream backends as-is — header filtering is the responsibility of the gateway HTTPRoute configuration and AuthPolicy
 - The router strips or rewrites gateway-internal headers (`mcp-session-id`, `mcp-init-host`, `router-key`) before traffic reaches upstream backends
 
