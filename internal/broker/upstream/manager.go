@@ -520,26 +520,32 @@ func (man *MCPManager) manage(ctx context.Context, event eventType) {
 			man.logger.ErrorContext(ctx, "failed to list resources", "upstream mcp server", man.mcp.ID(), "error", resourceErr)
 		} else {
 			toAddResources, toRemoveResources := man.diffResources(currentResources, fetchedResources)
-			man.toolsLock.Lock()
-			man.resources = fetchedResources
-			man.resourcesMap = make(map[string]*mcp.Resource, len(fetchedResources))
-			man.servedResourcesMap = make(map[string]*mcp.Resource, len(fetchedResources))
-			for i := range fetchedResources {
-				man.resourcesMap[fetchedResources[i].URI] = &fetchedResources[i]
-				man.servedResourcesMap[fetchedResources[i].URI] = &fetchedResources[i]
-			}
-			man.serverResources = slices.DeleteFunc(man.serverResources, func(r server.ServerResource) bool {
-				return slices.Contains(toRemoveResources, r.Resource.URI)
-			})
-			man.serverResources = append(man.serverResources, toAddResources...)
-			man.toolsLock.Unlock()
+			if conflictErr := man.findResourceConflicts(toAddResources); conflictErr != nil {
+				resourceErr = fmt.Errorf("upstream mcp failed to add resources to gateway %s : %w", man.mcp.ID(), conflictErr)
+				man.recordBackendError(span, resourceErr)
+				man.logger.ErrorContext(ctx, "resource conflict detected", "upstream mcp server", man.mcp.ID(), "error", resourceErr)
+			} else {
+				man.toolsLock.Lock()
+				man.resources = fetchedResources
+				man.resourcesMap = make(map[string]*mcp.Resource, len(fetchedResources))
+				man.servedResourcesMap = make(map[string]*mcp.Resource, len(fetchedResources))
+				for i := range fetchedResources {
+					man.resourcesMap[fetchedResources[i].URI] = &fetchedResources[i]
+					man.servedResourcesMap[fetchedResources[i].URI] = &fetchedResources[i]
+				}
+				man.serverResources = slices.DeleteFunc(man.serverResources, func(r server.ServerResource) bool {
+					return slices.Contains(toRemoveResources, r.Resource.URI)
+				})
+				man.serverResources = append(man.serverResources, toAddResources...)
+				man.toolsLock.Unlock()
 
-			man.logger.DebugContext(ctx, "updating gateway resources", "upstream mcp server", man.mcp.ID(), "adding", len(toAddResources), "removing", len(toRemoveResources))
-			if len(toRemoveResources) > 0 {
-				man.resourcesServer.DeleteResources(toRemoveResources...)
-			}
-			if len(toAddResources) > 0 {
-				man.resourcesServer.AddResources(toAddResources...)
+				man.logger.DebugContext(ctx, "updating gateway resources", "upstream mcp server", man.mcp.ID(), "adding", len(toAddResources), "removing", len(toRemoveResources))
+				if len(toRemoveResources) > 0 {
+					man.resourcesServer.DeleteResources(toRemoveResources...)
+				}
+				if len(toAddResources) > 0 {
+					man.resourcesServer.AddResources(toAddResources...)
+				}
 			}
 		}
 	}
@@ -889,6 +895,40 @@ func (man *MCPManager) findPromptConflicts(mcpPrompts []server.ServerPrompt) err
 	}
 	if len(conflictingPromptNames) > 0 {
 		return fmt.Errorf("conflicting prompts discovered. conflicting prompt names %v", conflictingPromptNames)
+	}
+	return nil
+}
+
+func (man *MCPManager) findResourceConflicts(mcpResources []server.ServerResource) error {
+	if man.resourcesServer == nil {
+		return nil
+	}
+	gatewayServerResources := man.resourcesServer.ListResources()
+	var conflictingURIs []string
+	for _, resource := range mcpResources {
+		for existingURI, existingResourceInfo := range gatewayServerResources {
+			existingResource := existingResourceInfo.Resource
+			if existingResource.Meta == nil || existingResource.Meta.AdditionalFields == nil {
+				man.logger.Error("unable to check conflict, resource meta is nil", "upstream mcp server", man.mcp.ID(), "uri", existingURI)
+				continue
+			}
+			existingResourceID, ok := existingResource.Meta.AdditionalFields[gatewayServerID]
+			if !ok {
+				man.logger.Error("unable to check conflict, resource id is missing", "upstream mcp server", man.mcp.ID())
+				continue
+			}
+			resourceID, is := existingResourceID.(string)
+			if !is {
+				man.logger.Error("unable to check conflict, resource id is not a string", "upstream mcp server", man.mcp.ID(), "type", reflect.TypeOf(existingResourceID))
+				continue
+			}
+			if existingURI == resource.Resource.URI && resourceID != string(man.mcp.ID()) {
+				conflictingURIs = append(conflictingURIs, resource.Resource.URI)
+			}
+		}
+	}
+	if len(conflictingURIs) > 0 {
+		return fmt.Errorf("conflicting resources discovered. conflicting URIs %v", conflictingURIs)
 	}
 	return nil
 }

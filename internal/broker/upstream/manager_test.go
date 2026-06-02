@@ -112,7 +112,7 @@ func (m *MockMCP) SupportsResources() bool {
 }
 
 func (m *MockMCP) SupportsResourcesListChanged() bool {
-	return m.hasResourcesListChangedCap
+	return m.hasResourcesCap && m.hasResourcesListChangedCap
 }
 
 func (m *MockMCP) ListResources(_ context.Context, _ mcp.ListResourcesRequest) (*mcp.ListResourcesResult, error) {
@@ -1682,6 +1682,7 @@ func TestMCPManager_shouldFetchResources(t *testing.T) {
 
 	t.Run("returns true on resource notification event", func(t *testing.T) {
 		mock := newMockMCP("test", "")
+		mock.hasResourcesCap = true
 		mock.hasResourcesListChangedCap = true
 		manager, err := NewUpstreamMCPManager(mock, newMockToolsAdderDeleter(), nil, nil, logger, 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
 		require.NoError(t, err)
@@ -1690,6 +1691,7 @@ func TestMCPManager_shouldFetchResources(t *testing.T) {
 
 	t.Run("returns true on timer when no resources cached", func(t *testing.T) {
 		mock := newMockMCP("test", "")
+		mock.hasResourcesCap = true
 		mock.hasResourcesListChangedCap = true
 		manager, err := NewUpstreamMCPManager(mock, newMockToolsAdderDeleter(), nil, nil, logger, 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
 		require.NoError(t, err)
@@ -1698,6 +1700,7 @@ func TestMCPManager_shouldFetchResources(t *testing.T) {
 
 	t.Run("returns false on timer when resources already cached", func(t *testing.T) {
 		mock := newMockMCP("test", "")
+		mock.hasResourcesCap = true
 		mock.hasResourcesListChangedCap = true
 		manager, err := NewUpstreamMCPManager(mock, newMockToolsAdderDeleter(), nil, nil, logger, 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
 		require.NoError(t, err)

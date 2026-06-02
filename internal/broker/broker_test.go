@@ -402,7 +402,8 @@ func createResourceTestManager(t *testing.T, serverName, prefix string, resource
 		Prefix: prefix,
 		URL:    "http://test.local/mcp",
 	})
-	manager, _ := upstream.NewUpstreamMCPManager(mcpServer, newMockGateway(), nil, nil, slog.Default(), 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
+	manager, err := upstream.NewUpstreamMCPManager(mcpServer, newMockGateway(), nil, nil, slog.Default(), 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
+	require.NoError(t, err)
 	manager.SetResourcesForTesting(resources)
 	return manager
 }

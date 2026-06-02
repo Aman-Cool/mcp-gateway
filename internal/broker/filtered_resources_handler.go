@@ -116,7 +116,7 @@ func (broker *mcpBrokerImpl) applyVirtualServerFilterForResources(headers http.H
 	vs, err := broker.GetVirtualSeverByHeader(virtualServerID)
 	if err != nil {
 		broker.logger.Error("failed to get virtual server for resource filtering", "error", err)
-		return resources
+		return []mcp.Resource{}
 	}
 
 	if len(vs.Resources) == 0 {
