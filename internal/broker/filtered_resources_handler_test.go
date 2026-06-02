@@ -9,6 +9,7 @@ import (
 	"github.com/Kuadrant/mcp-gateway/internal/broker/upstream"
 	"github.com/Kuadrant/mcp-gateway/internal/config"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/stretchr/testify/require"
 )
 
 func createResourceFilterTestManager(t *testing.T, serverName, prefix string, resources []mcp.Resource) *upstream.MCPManager {
@@ -18,7 +19,8 @@ func createResourceFilterTestManager(t *testing.T, serverName, prefix string, re
 		Prefix: prefix,
 		URL:    "http://test.local/mcp",
 	})
-	manager, _ := upstream.NewUpstreamMCPManager(mcpServer, newMockGateway(), nil, nil, slog.Default(), 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
+	manager, err := upstream.NewUpstreamMCPManager(mcpServer, newMockGateway(), nil, nil, slog.Default(), 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
+	require.NoError(t, err)
 	manager.SetResourcesForTesting(resources)
 	return manager
 }

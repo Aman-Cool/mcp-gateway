@@ -298,19 +298,6 @@ func ResourcesListHasURI(resourcesList *mcp.ListResourcesResult, uri string) boo
 	return false
 }
 
-// ResourcesListHasPrefix checks if any resource in the list has a URI with the given prefix
-func ResourcesListHasPrefix(resourcesList *mcp.ListResourcesResult, prefix string) bool {
-	if resourcesList == nil {
-		return false
-	}
-	for _, r := range resourcesList.Resources {
-		if strings.HasPrefix(r.URI, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // PromptsListHasPrefix checks if any prompt in the list has the given prefix
 func PromptsListHasPrefix(promptsList *mcp.ListPromptsResult, prefix string) bool {
 	return promptsListMatches(promptsList, func(name string) bool {
