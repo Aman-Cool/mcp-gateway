@@ -56,7 +56,7 @@ fi
 GENERATED_DIR=$(mktemp -d)
 trap 'rm -rf "$GENERATED_DIR"' EXIT
 
-"$REPO_ROOT/local/generate-oidc-authpolicies.sh" \
+"$REPO_ROOT/scripts/generate-oidc-authpolicies.sh" \
   --external-url "$EXTERNAL_URL" \
   --issuer-url "$ISSUER_URL" \
   --client-id "$CLIENT_ID" \
