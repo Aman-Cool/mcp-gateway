@@ -24,6 +24,8 @@ const (
 	allowedCapabilitiesClaimKey = "allowed-capabilities"
 	// gatewayServerIDKey matches the upstream.gatewayServerID constant used to tag registered items.
 	gatewayServerIDKey = "kuadrant/id"
+	// gatewaySourceURLKey matches the upstream.gatewaySourceURLKey used to tag the backend URL of registered resources.
+	gatewaySourceURLKey = "kuadrant/source-url"
 )
 
 // filterSpanAttrs returns the base OTel attributes for a list-filter span, appending the session ID if present.

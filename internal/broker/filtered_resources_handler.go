@@ -38,6 +38,7 @@ func (broker *mcpBrokerImpl) removeGatewayMetaFromResources(resources []mcp.Reso
 	for i := range resources {
 		if resources[i].Meta != nil {
 			delete(resources[i].Meta.AdditionalFields, gatewayServerIDKey)
+			delete(resources[i].Meta.AdditionalFields, gatewaySourceURLKey)
 			if len(resources[i].Meta.AdditionalFields) == 0 {
 				resources[i].Meta = nil
 			}

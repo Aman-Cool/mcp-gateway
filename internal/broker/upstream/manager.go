@@ -56,6 +56,7 @@ const (
 	notificationPromptsListChanged   = "notifications/prompts/list_changed"
 	notificationResourcesListChanged = "notifications/resources/list_changed"
 	gatewayServerID                  = "kuadrant/id"
+	gatewaySourceURLKey              = "kuadrant/source-url"
 )
 
 type eventType int
@@ -927,15 +928,36 @@ func (man *MCPManager) findResourceConflicts(mcpResources []server.ServerResourc
 	if man.resourcesServer == nil {
 		return nil
 	}
-	metas := make(map[string]*mcp.Meta)
+	// build URI → source URL map for currently registered resources.
+	// resource URIs are globally unique per MCP spec but that uniqueness is per origin
+	// server — two registrations pointing to the same backend URL legitimately serve
+	// the same URIs (tools avoid this problem because prefixes make names unique).
+	// A conflict only exists when two different backend URLs claim the same URI.
+	existingURLByURI := make(map[string]string)
 	for uri, info := range man.resourcesServer.ListResources() {
-		metas[uri] = info.Resource.Meta
+		meta := info.Resource.Meta
+		if meta == nil || meta.AdditionalFields == nil {
+			continue
+		}
+		rawURL, ok := meta.AdditionalFields[gatewaySourceURLKey]
+		if !ok {
+			continue
+		}
+		if sourceURL, is := rawURL.(string); is {
+			existingURLByURI[uri] = sourceURL
+		}
 	}
-	newKeys := make([]string, 0, len(mcpResources))
+	currentURL := man.mcp.GetConfig().URL
+	var conflicting []string
 	for _, r := range mcpResources {
-		newKeys = append(newKeys, r.Resource.URI)
+		if existingURL, ok := existingURLByURI[r.Resource.URI]; ok && existingURL != currentURL {
+			conflicting = append(conflicting, r.Resource.URI)
+		}
 	}
-	return man.checkConflicts(newKeys, man.extractRegisteredServerIDs(metas, "resource"), "resource")
+	if len(conflicting) > 0 {
+		return fmt.Errorf("conflicting resources discovered. conflicting URIs %v", conflicting)
+	}
+	return nil
 }
 
 // GetManagedPrompts returns a copy of all prompts discovered from the upstream server.
@@ -967,7 +989,8 @@ func (man *MCPManager) SetPromptsForTesting(prompts []mcp.Prompt) {
 
 func (man *MCPManager) resourceToServerResource(newResource mcp.Resource) server.ServerResource {
 	newResource.Meta = mcp.NewMetaFromMap(map[string]any{
-		gatewayServerID: string(man.mcp.ID()),
+		gatewayServerID:     string(man.mcp.ID()),
+		gatewaySourceURLKey: man.mcp.GetConfig().URL,
 	})
 	return server.ServerResource{
 		Resource: newResource,
