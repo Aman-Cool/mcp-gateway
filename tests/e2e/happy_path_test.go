@@ -1362,6 +1362,7 @@ var _ = Describe("MCP Gateway Registration Happy Path", func() {
 		Expect(status).To(Equal(http.StatusOK))
 		Expect(body).NotTo(BeEmpty())
 		Expect(body).NotTo(ContainSubstring(`"code":`), "resources/read should not return a JSON-RPC error")
+		Expect(body).To(ContainSubstring(`"contents"`), "resources/read should return actual resource content")
 
 		By("Unregistering the MCPServerRegistration")
 		Expect(k8sClient.Delete(ctx, registeredServer)).To(Succeed())

@@ -39,7 +39,7 @@ func (broker *mcpBrokerImpl) FilterPrompts(ctx context.Context, _ any, mcpReq *m
 func (broker *mcpBrokerImpl) removeGatewayMetaFromPrompts(prompts []mcp.Prompt) []mcp.Prompt {
 	for i := range prompts {
 		if prompts[i].Meta != nil {
-			delete(prompts[i].Meta.AdditionalFields, "kuadrant/id")
+			delete(prompts[i].Meta.AdditionalFields, gatewayServerIDKey)
 			if len(prompts[i].Meta.AdditionalFields) == 0 {
 				prompts[i].Meta = nil
 			}

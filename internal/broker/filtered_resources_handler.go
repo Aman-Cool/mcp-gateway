@@ -37,7 +37,7 @@ func (broker *mcpBrokerImpl) FilterResources(ctx context.Context, _ any, mcpReq 
 func (broker *mcpBrokerImpl) removeGatewayMetaFromResources(resources []mcp.Resource) []mcp.Resource {
 	for i := range resources {
 		if resources[i].Meta != nil {
-			delete(resources[i].Meta.AdditionalFields, "kuadrant/id")
+			delete(resources[i].Meta.AdditionalFields, gatewayServerIDKey)
 			if len(resources[i].Meta.AdditionalFields) == 0 {
 				resources[i].Meta = nil
 			}

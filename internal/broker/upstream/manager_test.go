@@ -399,7 +399,7 @@ func TestMCPManager_setStatus(t *testing.T) {
 			require.NoError(t, err)
 			manager.serverTools = make([]server.ServerTool, tc.numServerTools)
 
-			manager.setStatus(tc.err, tc.totalTools, 0, nil, nil)
+			manager.setStatus(tc.err, tc.totalTools, 0, 0, nil, nil)
 
 			assert.Equal(t, string(mock.id), manager.status.ID)
 			assert.Equal(t, "test-server", manager.status.Name)

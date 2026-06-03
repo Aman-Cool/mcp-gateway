@@ -20,7 +20,11 @@ import (
 var authorizedCapabilitiesHeader = http.CanonicalHeaderKey("x-mcp-authorized")
 var virtualMCPHeader = http.CanonicalHeaderKey("x-mcp-virtualserver")
 
-const allowedCapabilitiesClaimKey = "allowed-capabilities"
+const (
+	allowedCapabilitiesClaimKey = "allowed-capabilities"
+	// gatewayServerIDKey matches the upstream.gatewayServerID constant used to tag registered items.
+	gatewayServerIDKey = "kuadrant/id"
+)
 
 // filterSpanAttrs returns the base OTel attributes for a list-filter span, appending the session ID if present.
 func (broker *mcpBrokerImpl) filterSpanAttrs(ctx context.Context) []attribute.KeyValue {

@@ -76,6 +76,7 @@ type ServerValidationStatus struct {
 	Ready             bool                `json:"ready"`
 	TotalTools        int                 `json:"totalTools"`
 	TotalPrompts      int                 `json:"totalPrompts"`
+	TotalResources    int                 `json:"totalResources"`
 	InvalidTools      int                 `json:"invalidTools"`
 	InvalidToolList   []InvalidToolInfo   `json:"invalidToolList,omitempty"`
 	InvalidPrompts    int                 `json:"invalidPrompts"`
@@ -349,12 +350,13 @@ func (man *MCPManager) manage(ctx context.Context, event eventType) {
 		man.removeAllTools()
 		man.removeAllPrompts()
 		_ = man.mcp.Disconnect()
-		man.setStatus(fmt.Errorf("server is disabled"), 0, 0, nil, nil)
+		man.setStatus(fmt.Errorf("server is disabled"), 0, 0, 0, nil, nil)
 		return
 	}
 
 	numberOfTools := len(man.tools)
 	numberOfPrompts := len(man.prompts)
+	numberOfResources := len(man.resources)
 	// during connect the client will validate the protocol. So we don't have a separate validate requirement currently. If a client already exists it will be re-used.
 	man.logger.DebugContext(ctx, "attempting to connect", "upstream mcp server", man.mcp.ID())
 	if err := man.mcp.Connect(ctx, man.registerCallbacks()); err != nil {
@@ -366,7 +368,7 @@ func (man *MCPManager) manage(ctx context.Context, event eventType) {
 		man.removeAllPrompts()
 		// we call disconnect here as we may have connected but failed to initialize
 		_ = man.mcp.Disconnect()
-		man.setStatus(err, numberOfTools, numberOfPrompts, nil, nil)
+		man.setStatus(err, numberOfTools, numberOfPrompts, numberOfResources, nil, nil)
 		return
 	}
 	// there may be an active client so we also ping
@@ -379,7 +381,7 @@ func (man *MCPManager) manage(ctx context.Context, event eventType) {
 		man.removeAllTools()
 		man.removeAllPrompts()
 		_ = man.mcp.Disconnect()
-		man.setStatus(err, numberOfTools, numberOfPrompts, nil, nil)
+		man.setStatus(err, numberOfTools, numberOfPrompts, numberOfResources, nil, nil)
 		return
 	}
 
@@ -527,6 +529,7 @@ func (man *MCPManager) manage(ctx context.Context, event eventType) {
 			} else {
 				man.toolsLock.Lock()
 				man.resources = fetchedResources
+				numberOfResources = len(fetchedResources)
 				man.resourcesMap = make(map[string]*mcp.Resource, len(fetchedResources))
 				man.servedResourcesMap = make(map[string]*mcp.Resource, len(fetchedResources))
 				for i := range fetchedResources {
@@ -551,7 +554,7 @@ func (man *MCPManager) manage(ctx context.Context, event eventType) {
 	}
 
 	jointErr := errors.Join(toolErr, promptErr, resourceErr)
-	man.setStatus(jointErr, numberOfTools, numberOfPrompts, invalidTools, invalidPrompts)
+	man.setStatus(jointErr, numberOfTools, numberOfPrompts, numberOfResources, invalidTools, invalidPrompts)
 	if jointErr != nil {
 		man.applyBackoff()
 	} else {
@@ -596,7 +599,7 @@ func (man *MCPManager) GetStatus() ServerValidationStatus {
 	return man.status
 }
 
-func (man *MCPManager) setStatus(err error, toolCount int, promptCount int, invalidTools []InvalidToolInfo, invalidPrompts []InvalidPromptInfo) {
+func (man *MCPManager) setStatus(err error, toolCount int, promptCount int, resourceCount int, invalidTools []InvalidToolInfo, invalidPrompts []InvalidPromptInfo) {
 	man.status.ID = string(man.mcp.ID())
 	man.status.LastValidated = time.Now()
 	man.status.Name = man.MCPName()
@@ -611,8 +614,9 @@ func (man *MCPManager) setStatus(err error, toolCount int, promptCount int, inva
 	}
 	man.status.TotalTools = toolCount
 	man.status.TotalPrompts = promptCount
+	man.status.TotalResources = resourceCount
 	man.status.Ready = true
-	man.status.Message = fmt.Sprintf("server added successfully. Total tools added %d. Total prompts added %d", toolCount, promptCount)
+	man.status.Message = fmt.Sprintf("server added successfully. Total tools added %d. Total prompts added %d. Total resources added %d", toolCount, promptCount, resourceCount)
 }
 
 func (man *MCPManager) resetBackoff() {
@@ -968,7 +972,7 @@ func (man *MCPManager) resourceToServerResource(newResource mcp.Resource) server
 	return server.ServerResource{
 		Resource: newResource,
 		Handler: func(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-			return []mcp.ResourceContents{}, nil
+			return nil, fmt.Errorf("resources/read must be routed via ext_proc, not called directly")
 		},
 	}
 }

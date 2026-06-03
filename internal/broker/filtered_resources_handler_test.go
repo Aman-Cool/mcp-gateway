@@ -5,25 +5,10 @@ import (
 	"net/http"
 	"testing"
 
-	mcpv1alpha1 "github.com/Kuadrant/mcp-gateway/api/v1alpha1"
 	"github.com/Kuadrant/mcp-gateway/internal/broker/upstream"
 	"github.com/Kuadrant/mcp-gateway/internal/config"
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/stretchr/testify/require"
 )
-
-func createResourceFilterTestManager(t *testing.T, serverName, prefix string, resources []mcp.Resource) *upstream.MCPManager {
-	t.Helper()
-	mcpServer := upstream.NewUpstreamMCP(&config.MCPServer{
-		Name:   serverName,
-		Prefix: prefix,
-		URL:    "http://test.local/mcp",
-	})
-	manager, err := upstream.NewUpstreamMCPManager(mcpServer, newMockGateway(), nil, nil, slog.Default(), 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
-	require.NoError(t, err)
-	manager.SetResourcesForTesting(resources)
-	return manager
-}
 
 func TestFilterResources(t *testing.T) {
 	testCases := []struct {
@@ -88,7 +73,7 @@ func TestFilterResources_JWTFiltering(t *testing.T) {
 		trustedHeadersPublicKey: testPublicKey,
 		logger:                  slog.Default(),
 		mcpServers: map[config.UpstreamMCPID]upstream.ActiveMCPServer{
-			"mcp-test/test-server1:test_:http://test.local/mcp": upstream.NewActiveForTesting(createResourceFilterTestManager(t,
+			"mcp-test/test-server1:test_:http://test.local/mcp": upstream.NewActiveForTesting(createResourceTestManager(t,
 				"mcp-test/test-server1",
 				"test_",
 				[]mcp.Resource{{URI: "test://r1", Name: "r1"}, {URI: "test://r2", Name: "r2"}},
