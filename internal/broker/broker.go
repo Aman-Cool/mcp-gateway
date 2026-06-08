@@ -324,6 +324,7 @@ func (m *mcpBrokerImpl) OnConfigChange(ctx context.Context, conf *config.MCPServ
 			m.mcpServers[mcpServer.ID()] = manager.Start(ctx)
 		}
 	}
+	// replace virtual servers with the new snapshot so deleted entries are removed
 	m.syncTagsTools(ctx, servers)
 
 	// precompute userSpecificList servers for FetchUserSpecificTools
@@ -341,9 +342,11 @@ func (m *mcpBrokerImpl) OnConfigChange(ctx context.Context, conf *config.MCPServ
 
 	// register virtual servers
 	m.vsLock.Lock()
+	next := make(map[string]*config.VirtualServer, len(virtualServers))
 	for _, vs := range virtualServers {
-		m.virtualServers[vs.Name] = vs
+		next[vs.Name] = vs
 	}
+	m.virtualServers = next
 	m.vsLock.Unlock()
 	m.logger.DebugContext(ctx, "Broker OnConfigChange done", "Total managers for upstream mcp servers", len(m.mcpServers), "total servers", len(servers))
 }
