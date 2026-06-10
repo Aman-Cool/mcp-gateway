@@ -138,12 +138,16 @@ sequenceDiagram
     Note over Router: isA2A = true (path prefix)
     Router-->>Envoy: continue (headers phase pass-through)
     Envoy->>Router: ProcessingRequest_RequestBody
-    Note over Router: parse A2ARequest<br/>validateSession(mcp-session-id)<br/>GetAgentInfo("weather_forecast") → weather agent<br/>generate gatewayTaskID<br/>set :authority = agent hostname<br/>set :path = /a2a<br/>set x-a2a-agent, x-a2a-task-id headers
-    Router-->>Envoy: ImmediateResponse with header mutations
-    Envoy->>Upstream: POST /a2a (routed by :authority)<br/>body: {method: "message/send", ...} (upstream task ID)
-    Upstream-->>Router: ProcessingRequest_ResponseHeaders
-    Note over Router: rewrite upstream task ID → gateway task ID<br/>StoreTaskRoute(gatewayTaskID, TaskRoute)
-    Router-->>Client: response with gatewayTaskID
+    Note over Router: parse A2ARequest<br/>validateSession(mcp-session-id)<br/>GetAgentInfo("weather_forecast") → weather agent<br/>generate gatewayTaskID, store in a2aRequest<br/>set mcpRequest.serverName = agent.Name<br/>set :authority = agent hostname<br/>set :path = /a2a<br/>set x-a2a-agent, x-a2a-task-id headers
+    Router-->>Envoy: BodyResponse with header mutations (continue)
+    Envoy->>Upstream: POST /a2a (routed by :authority)
+    Upstream-->>Envoy: HTTP 200 OK
+    Envoy->>Router: ProcessingRequest_ResponseHeaders
+    Note over Router: non-streaming A2A, status == 200<br/>set ModeOverride: ResponseBodyMode=BUFFERED
+    Router-->>Envoy: HeadersResponse with ModeOverride
+    Envoy->>Router: ProcessingRequest_ResponseBody<br/>body: {jsonrpc: "2.0", result: {id: "upstream-abc", ...}}
+    Note over Router: parse upstream task ID from result.id<br/>StoreTaskRoute(gatewayTaskID, TaskRoute{serverName, "upstream-abc"})<br/>rewrite body: "upstream-abc" → "gateway-123"
+    Router-->>Client: BodyResponse: {result: {id: "gateway-123", ...}}
 ```
 
 #### message/send Routing (SSE streaming)
@@ -156,17 +160,24 @@ sequenceDiagram
     participant Upstream as Upstream A2A Agent
 
     Client->>Envoy: POST /a2a<br/>Accept: text/event-stream
-    Envoy->>Router: RequestHeaders + RequestBody
-    Note over Router: isA2A = true<br/>isStreamingMethod = true<br/>set ModeOverride: ResponseBodyMode=STREAMED
-    Router-->>Envoy: header mutations + ModeOverride
-    Envoy->>Upstream: POST /a2a (routed)
+    Envoy->>Router: ProcessingRequest_RequestHeaders<br/>:path = /a2a
+    Note over Router: isA2A = true (path prefix)
+    Router-->>Envoy: continue (headers phase pass-through)
+    Envoy->>Router: ProcessingRequest_RequestBody
+    Note over Router: parse A2ARequest<br/>validateSession(mcp-session-id)<br/>GetAgentInfo("weather_forecast") → weather agent<br/>generate gatewayTaskID, store in a2aRequest<br/>set mcpRequest.serverName = agent.Name<br/>set :authority = agent hostname, set routing headers
+    Router-->>Envoy: BodyResponse with header mutations (continue)
+    Envoy->>Upstream: POST /a2a (routed by :authority)
+    Upstream-->>Envoy: HTTP 200 OK
+    Envoy->>Router: ProcessingRequest_ResponseHeaders
+    Note over Router: isA2AStreamingMethod() == true, status == 200<br/>set ModeOverride: ResponseBodyMode=STREAMED<br/>init a2aSSEPassthrough(gatewayTaskID, serverName)
+    Router-->>Envoy: HeadersResponse with ModeOverride
     loop SSE chunks
-        Upstream-->>Envoy: data: {"id": "upstream-abc", "status": "working"}
+        Upstream-->>Envoy: data: {"result": {"id": "upstream-abc", "status": "working"}}
         Envoy->>Router: ProcessingRequest_ResponseBody
-        Note over Router: a2aSSEPassthrough.Process()<br/>replace "upstream-abc" → "gateway-123"
-        Router-->>Client: data: {"id": "gateway-123", "status": "working"}
+        Note over Router: a2aSSEPassthrough.Process()<br/>first chunk: StoreTaskRoute(gatewayTaskID, TaskRoute{serverName, "upstream-abc"})<br/>all chunks: replace "upstream-abc" → "gateway-123"
+        Router-->>Client: data: {"result": {"id": "gateway-123", "status": "working"}}
     end
-    Upstream-->>Client: data: {"id": "gateway-123", "status": "completed"}
+    Upstream-->>Client: data: {"result": {"id": "gateway-123", "status": "completed"}}
 ```
 
 #### tasks/get Routing
@@ -174,13 +185,22 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Client
+    participant Envoy
     participant Router as ext_proc Router
     participant Upstream as Upstream A2A Agent
 
-    Client->>Router: POST /a2a<br/>body: {method: "tasks/get", params: {id: "gateway-123"}}
-    Note over Router: validateSession()<br/>ResolveTaskRoute("gateway-123")<br/>→ TaskRoute{agentHostname, upstreamTaskID: "upstream-abc"}<br/>rewrite id in body: "upstream-abc"<br/>set :authority = agent hostname
-    Router->>Upstream: POST /a2a<br/>body: {method: "tasks/get", params: {id: "upstream-abc"}}
-    Upstream-->>Client: task result (id rewritten back to "gateway-123")
+    Client->>Envoy: POST /a2a<br/>body: {method: "tasks/get", params: {id: "gateway-123"}}
+    Envoy->>Router: ProcessingRequest_RequestBody
+    Note over Router: validateSession()<br/>ResolveTaskRoute("gateway-123")<br/>→ TaskRoute{agentHostname, upstreamTaskID: "upstream-abc"}<br/>rewrite params.id: "gateway-123" → "upstream-abc"<br/>set :authority = agent hostname
+    Router-->>Envoy: BodyResponse with rewritten body + header mutations (continue)
+    Envoy->>Upstream: POST /a2a<br/>body: {method: "tasks/get", params: {id: "upstream-abc"}}
+    Upstream-->>Envoy: HTTP 200 OK
+    Envoy->>Router: ProcessingRequest_ResponseHeaders
+    Note over Router: non-streaming A2A, status == 200<br/>set ModeOverride: ResponseBodyMode=BUFFERED
+    Router-->>Envoy: HeadersResponse with ModeOverride
+    Envoy->>Router: ProcessingRequest_ResponseBody<br/>body: {result: {id: "upstream-abc", ...}}
+    Note over Router: rewrite result.id: "upstream-abc" → "gateway-123"
+    Router-->>Client: BodyResponse: {result: {id: "gateway-123", ...}}
 ```
 
 #### Task Lifecycle State Machine
@@ -200,7 +220,7 @@ stateDiagram-v2
     canceled --> [*]
     rejected --> [*]
 
-    note right of submitted: gateway generates task ID\nStoreTaskRoute() called
+    note right of submitted: gateway task ID generated at RequestBody\nStoreTaskRoute() called at ResponseBody
     note right of completed: task route remains until\ngateway session expires
 ```
 
@@ -210,7 +230,7 @@ stateDiagram-v2
 |---|---|
 | Controller (`A2AReconciler`) | Watches `A2AAgentRegistration` CRDs. Resolves HTTPRoute → upstream endpoint → agent card URL. Writes `A2AAgent` config to the config Secret. Sets `Ready` and `AgentCardDiscovered` status conditions. |
 | Broker (`a2a.Broker`) | Implements `config.Observer`. On config change, calls `SetAgents()`. `FederatedCard()` fetches Agent Cards from all enabled upstream agents concurrently, applies `SkillPrefix`, merges into a single card. `ServeAgentCard()` serves `GET /.well-known/agent.json`. `GetAgentInfo(skillID)` resolves a prefixed skill to the upstream agent using longest-prefix matching. |
-| Router (`ExtProcServer`) | Detects A2A traffic by `:path` prefix at the `RequestHeaders` phase. At the `RequestBody` phase: validates session JWT, calls `A2ABroker.GetAgentInfo()`, generates a gateway task ID, stores `TaskRoute`, sets `:authority` and `:path` headers, rewrites task ID in response. Sets `ModeOverride` for SSE streaming. `a2aSSEPassthrough` rewrites upstream task IDs in `data:` lines. |
+| Router (`ExtProcServer`) | Detects A2A traffic by `:path` prefix at the `RequestHeaders` phase. At the `RequestBody` phase: validates session JWT; for `message/send`/`message/stream`, calls `A2ABroker.GetAgentInfo()`, generates a gateway task ID (carried in `a2aRequest`), sets `mcpRequest.serverName` to the resolved agent name, sets routing headers (`:authority`, `:path`, `x-a2a-agent`, `x-a2a-task-id`); for `tasks/get`/`tasks/cancel`, calls `ResolveTaskRoute()` to look up the agent and upstream task ID, rewrites gateway task ID in request body to upstream task ID, sets `:authority`. At the `ResponseHeaders` phase: for all A2A requests, sets `ModeOverride ResponseBodyMode=BUFFERED` (non-streaming) or `STREAMED` (SSE) when `status == 200`. At the `ResponseBody` phase: for non-streaming, parses upstream task ID from `result.id`, calls `StoreTaskRoute(gatewayTaskID, TaskRoute{...})`, rewrites upstream task ID to gateway task ID in response body; for `tasks/get` responses, rewrites result task ID back to gateway task ID. `a2aSSEPassthrough.Process()` handles streaming: on first chunk stores `TaskRoute` and rewrites task IDs; on subsequent chunks rewrites only. |
 | Config (`MCPServersConfig`) | Stores `A2AAgents []*A2AAgent` alongside `Servers`. `SetA2AAgents()`, `ListA2AAgents()` provide thread-safe access under the existing `sync.RWMutex`. `Notify()` delivers A2A agent list to observers. |
 | Config Secret (`SecretReaderWriter`) | `UpsertA2AAgent()` and `RemoveA2AAgent()` follow the existing read-modify-write pattern with `retry.RetryOnConflict()`. `BrokerConfig` YAML gains an `a2aAgents` key. |
 | Gateway HTTPRoute (`broker_router.go`) | `buildGatewayHTTPRoute()` gains two new rules: `/a2a` (with `stripRouterHeaders` filter removing `x-a2a-agent` and `x-a2a-task-id`) and `/.well-known/agent.json`. `httpRouteNeedsUpdate()` via `DeepEqual` ensures automatic updates on existing deployments. |
@@ -259,15 +279,18 @@ status:
 ```go
 // internal/config/a2a_types.go
 type A2AAgent struct {
-    Name         string `json:"name"                   yaml:"name"`
-    URL          string `json:"url"                    yaml:"url"`
-    Hostname     string `json:"hostname,omitempty"     yaml:"hostname,omitempty"`
-    SkillPrefix  string `json:"skillPrefix,omitempty"  yaml:"skillPrefix,omitempty"`
-    Credential   string `json:"credential,omitempty"   yaml:"credential,omitempty"`
-    AgentCardURL string `json:"agentCardURL,omitempty" yaml:"agentCardURL,omitempty"`
-    State        string `json:"state"                  yaml:"state"`
+    Name         string      `json:"name"                   yaml:"name"`
+    URL          string      `json:"url"                    yaml:"url"`
+    Hostname     string      `json:"hostname,omitempty"     yaml:"hostname,omitempty"`
+    SkillPrefix  string      `json:"skillPrefix,omitempty"  yaml:"skillPrefix,omitempty"`
+    Auth         *AuthConfig `json:"auth,omitempty"         yaml:"auth,omitempty"`
+    Credential   string      `json:"credential,omitempty"   yaml:"credential,omitempty"`
+    AgentCardURL string      `json:"agentCardURL,omitempty" yaml:"agentCardURL,omitempty"`
+    State        string      `json:"state"                  yaml:"state"`
 }
 ```
+
+`AuthConfig` is the existing type from `internal/config/types.go`. `Auth` covers bearer tokens and API keys for upstream agent card fetching; `Credential` covers the simple secret reference case. If both are set, `Auth` takes precedence.
 
 `BrokerConfig` gains:
 
@@ -313,7 +336,8 @@ DeleteTaskRoute(ctx context.Context, gatewayTaskID string) error
 ```
 
 In-memory: new `taskRoutes sync.Map` field on `Cache`, separate from `inmemory` to avoid type
-collision. COW mutation pattern from PR #888 applies.
+collision. No COW needed — values are immutable `TaskRoute` structs stored and replaced atomically
+via `sync.Map.Store`, unlike the `inmemory` map whose values are `map[string]string` requiring COW.
 
 Redis: key `a2atask:{gatewayTaskID}`, TTL from `JWTManager.GetExpiresIn(gatewaySessionID)`.
 Matches the session TTL alignment established in PR #1037.
@@ -355,8 +379,10 @@ client `message/send` requests. The same authentication separation applies as wi
 `MCPServerRegistration.credentialRef`.
 
 **Skill prefix collision.** Two `A2AAgentRegistrations` with overlapping `skillPrefix` values
-would cause ambiguous routing. The validating webhook checks for prefix uniqueness within a
-namespace at admission time.
+would cause ambiguous routing. The `A2AReconciler` detects prefix conflicts at reconcile time
+by listing all `A2AAgentRegistrations` in the namespace and comparing prefixes. A conflict sets
+a `PrefixConflict` condition on the newer registration and skips writing it to the config Secret
+until the conflict is resolved. No admission webhook is required.
 
 ## Relationship to Existing Approaches
 

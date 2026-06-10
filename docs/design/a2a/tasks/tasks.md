@@ -290,9 +290,17 @@ curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
 - `internal/session/cache.go`
 - `internal/session/cache_test.go`
 
+**Note:** The `a2a-task-routing-infra` branch has an existing partial implementation with a
+simpler `StoreTaskRoute(ctx, taskID, serverName string)` signature. That branch must be rebased
+onto current main and updated to use the full `TaskRoute` struct and gateway-owned task IDs
+defined here before this task merges.
+
 **Acceptance criteria:**
 - [ ] `taskRoutes sync.Map` field added to `Cache` (separate from `inmemory`)
-- [ ] `StoreTaskRoute()`, `ResolveTaskRoute()`, `DeleteTaskRoute()` implemented for both in-memory and Redis
+- [ ] `StoreTaskRoute(ctx, gatewayTaskID string, route TaskRoute) error` implemented for in-memory and Redis
+- [ ] `ResolveTaskRoute(ctx, gatewayTaskID string) (TaskRoute, bool, error)` implemented for in-memory and Redis
+- [ ] `DeleteTaskRoute(ctx, gatewayTaskID string) error` implemented for in-memory and Redis
+- [ ] `SessionCache` interface in `internal/mcp-router/server.go` updated with the above signatures
 - [ ] Redis key prefix `a2atask:`, TTL from `JWTManager.GetExpiresIn()` matching session TTL
 - [ ] `HandleA2ATaskSend()` updated: generate gateway task ID, call `StoreTaskRoute()`, rewrite task ID in response body
 - [ ] `HandleA2ATaskGet()` and `HandleA2ATaskCancel()` call `ResolveTaskRoute()` to find upstream agent and rewrite ID
