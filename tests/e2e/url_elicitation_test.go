@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var _ = Describe("URL Elicitation", Ordered, func() {
+var _ = Describe("URL Elicitation", Ordered, ContinueOnFailure, func() {
 	var (
 		testResources []client.Object
 		prefix        string
