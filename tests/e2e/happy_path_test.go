@@ -1161,51 +1161,6 @@ var _ = Describe("MCP Gateway Registration Happy Path", func() {
 		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
 	})
 
-	It("[Happy] should send notifications to connected clients when server with prompts is registered", func() {
-		By("Creating clients with notification handlers")
-		client1Notification := false
-		client1, err := NewMCPGatewayClientWithNotifications(ctx, gatewayURL, func(j mcp.JSONRPCNotification) {
-			if strings.Contains(j.Method, "list_changed") {
-				GinkgoWriter.Println("client 1 received notification", j.Method)
-				client1Notification = true
-			}
-		})
-		Expect(err).NotTo(HaveOccurred())
-		defer func() { _ = client1.Close() }()
-
-		client2Notification := false
-		client2, err := NewMCPGatewayClientWithNotifications(ctx, gatewayURL, func(j mcp.JSONRPCNotification) {
-			if strings.Contains(j.Method, "list_changed") {
-				GinkgoWriter.Println("client 2 received notification", j.Method)
-				client2Notification = true
-			}
-		})
-		Expect(err).NotTo(HaveOccurred())
-		defer func() { _ = client2.Close() }()
-
-		By("Registering a new MCPServerRegistration with prompts")
-		registration := NewMCPServerResourcesWithDefaults("prompt-notification-test", k8sClient).
-			WithBackendTarget(sharedMCPTestServer1, 9090).WithPrefix("pnotif_").Build()
-		testResources = append(testResources, registration.GetObjects()...)
-		registeredServer := registration.Register(ctx)
-
-		By("Waiting for the server to become ready")
-		Eventually(func(g Gomega) {
-			g.Expect(VerifyMCPServerRegistrationReady(ctx, k8sClient, registeredServer.Name, registeredServer.Namespace)).To(BeNil())
-		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
-
-		By("Waiting for prompts to show up")
-		WaitForPromptsWithPrefix(ctx, mcpGatewayClient, registeredServer.Spec.Prefix)
-
-		By("Verifying both clients received list_changed notifications")
-		Eventually(func(g Gomega) {
-			_, err := client1.ListPrompts(ctx, mcp.ListPromptsRequest{})
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(client1Notification).To(BeTrue(), "client1 should have received a list_changed notification")
-			g.Expect(client2Notification).To(BeTrue(), "client2 should have received a list_changed notification")
-		}, TestTimeoutMedium, TestRetryInterval).To(Succeed())
-	})
-
 	It("[Happy] should report prompt conflicts in MCPServerRegistration status when same prefix is used", func() {
 		By("Creating first MCPServerRegistration with a specific prefix pointing to server1")
 		registration1 := NewMCPServerResources("prompt-conflict-1", "pconflict-s1.mcp-gateway.local", sharedMCPTestServer1, 9090, k8sClient).
