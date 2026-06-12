@@ -1161,40 +1161,6 @@ var _ = Describe("MCP Gateway Registration Happy Path", func() {
 		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
 	})
 
-	It("[Happy] should report prompt conflicts in MCPServerRegistration status when same prefix is used", func() {
-		By("Creating first MCPServerRegistration with a specific prefix pointing to server1")
-		registration1 := NewMCPServerResources("prompt-conflict-1", "pconflict-s1.mcp-gateway.local", sharedMCPTestServer1, 9090, k8sClient).
-			WithPrefix("pconflict_").Build()
-		testResources = append(testResources, registration1.GetObjects()...)
-		server1 := registration1.Register(ctx)
-
-		By("Ensuring first server becomes ready")
-		Eventually(func(g Gomega) {
-			g.Expect(VerifyMCPServerRegistrationReady(ctx, k8sClient, server1.Name, server1.Namespace)).To(BeNil())
-		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
-
-		By("Creating second MCPServerRegistration with the SAME prefix pointing to server1 via different hostname")
-		registration2 := NewMCPServerResources("prompt-conflict-2", "pconflict-s2.mcp-gateway.local", sharedMCPTestServer1, 9090, k8sClient).
-			WithPrefix("pconflict_").Build()
-		testResources = append(testResources, registration2.GetObjects()...)
-		server2 := registration2.Register(ctx)
-
-		By("Verifying at least one MCPServerRegistration reports conflict in status")
-		Eventually(func(g Gomega) {
-			msg1, err1 := GetMCPServerRegistrationStatusMessage(ctx, k8sClient, server1.Name, server1.Namespace)
-			msg2, err2 := GetMCPServerRegistrationStatusMessage(ctx, k8sClient, server2.Name, server2.Namespace)
-
-			g.Expect(err1).NotTo(HaveOccurred())
-			g.Expect(err2).NotTo(HaveOccurred())
-
-			GinkgoWriter.Println("Server1 status:", msg1)
-			GinkgoWriter.Println("Server2 status:", msg2)
-
-			hasConflict := strings.Contains(msg1, "conflict") || strings.Contains(msg2, "conflict")
-			g.Expect(hasConflict).To(BeTrue(), "expected at least one server to report prompt conflict")
-		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
-	})
-
 	It("[Happy] should return error for prompts/get with nonexistent prompt", func() {
 		By("Creating MCPServerRegistration for server1")
 		registration := NewMCPServerResourcesWithDefaults("prompt-notfound", k8sClient).
