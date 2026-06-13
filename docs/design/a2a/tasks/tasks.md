@@ -19,7 +19,7 @@ The following primitives exist in the codebase and are reused directly by the A2
 | SecretReaderWriter | `internal/config/config_writer.go` | Extended with UpsertA2AAgent/RemoveA2AAgent |
 | MCPReconciler | `internal/controller/mcpserverregistration_controller.go` | Template for A2AReconciler |
 | HTTPRouteWrapper | `internal/controller/httproute_wrapper.go` | Used directly in A2AReconciler |
-| buildGatewayHTTPRoute() | `internal/controller/broker_router.go` | Modified to add /a2a and /.well-known/agent.json rules |
+| buildGatewayHTTPRoute() | `internal/controller/broker_router.go` | Modified to add /a2a prefix and /.well-known/api-catalog rules |
 | ModeOverride (SSE) | `internal/mcp-router/response_handlers.go` | A2A streaming passthrough |
 
 ---
@@ -187,7 +187,7 @@ make test-unit
 **Acceptance criteria:**
 - [ ] `a2a.Broker` implements `config.Observer`: `OnConfigChange()` calls `SetAgents(cfg.ListA2AAgents())`
 - [ ] `FederatedCard()` has OTel span `"a2a.FederatedCard"` with `agent.count` attribute, following `HandleToolCall()` pattern
-- [ ] Unit tests: `OnConfigChange` triggers `SetAgents`; `FederatedCard` with unreachable upstream skips gracefully; `GetAgentInfo` longest-prefix matching
+- [ ] Unit tests: `OnConfigChange` triggers `SetAgents`; `ServeAgentCard` with unreachable upstream skips gracefully; `GetAgentByPrefix` lookup
 - [ ] `go test -race ./internal/a2a/...` passes
 
 **Verification:**
@@ -209,7 +209,7 @@ make test-unit
 
 **Acceptance criteria:**
 - [ ] `a2aBroker` initialized in `main.go` and registered as observer: `cfg.RegisterObserver(a2aBroker)`
-- [ ] `/.well-known/agent.json` registered in `setUpHTTPServer()` after `/.well-known/oauth-protected-resource`
+- [ ] `/.well-known/api-catalog` and `/a2a/{prefix}/.well-known/agent.json` registered in `setUpHTTPServer()` after `/.well-known/oauth-protected-resource`
 - [ ] `A2ABroker a2a.Broker` field added to `ExtProcServer` struct in `createRouter()`
 - [ ] `make build` passes
 
@@ -217,8 +217,8 @@ make test-unit
 ```bash
 make build
 make deploy
-curl http://mcp.127-0-0-1.sslip.io:8001/.well-known/agent.json
-# expect: {"skills":[]} (no agents registered yet)
+curl http://mcp.127-0-0-1.sslip.io:8001/.well-known/api-catalog
+# expect: {"links":[]} (no agents registered yet)
 ```
 
 ---
@@ -235,12 +235,13 @@ curl http://mcp.127-0-0-1.sslip.io:8001/.well-known/agent.json
 
 **Acceptance criteria:**
 - [ ] `isA2A` bool set in `Process()` at `RequestHeaders` phase via `strings.HasPrefix(requestPath, "/a2a")`
+- [ ] At `RequestHeaders` phase for `message/send`: extract agent prefix from `:path`, call `A2ABroker.GetAgentByPrefix()`, set `:authority` to agent hostname, set `x-a2a-agent` and `x-a2a-task-id` headers
 - [ ] A2A header constants defined in `internal/headers/headers.go`: `A2AAgentHeader`, `A2ATaskIDHeader`, `A2AMethodHeader`
 - [ ] `WithA2AAgent()`, `WithA2ATaskID()`, `WithA2AMethod()` added to `HeadersBuilder`
 - [ ] `x-a2a-agent` and `x-a2a-task-id` added to `internalOnlyHeaders`
-- [ ] `buildGatewayHTTPRoute()` gains `/a2a` rule with `stripRouterHeaders` and `/.well-known/agent.json` rule
+- [ ] `buildGatewayHTTPRoute()` gains `/a2a` prefix rule with `stripRouterHeaders` and `/.well-known/api-catalog` rule
 - [ ] Stub `RouteA2ARequest()` returning empty pass-through
-- [ ] Unit tests: mock ext_proc stream with `/a2a` path → `isA2A=true`; `/mcp` path → `isA2A=false`
+- [ ] Unit tests: mock ext_proc stream with `/a2a/weather` path → `isA2A=true`, prefix "weather" extracted; `/mcp` path → `isA2A=false`
 - [ ] `make test-unit` passes
 
 **Verification:**
@@ -253,7 +254,7 @@ make lint
 
 ### Task 10: Router — A2A Request Routing
 
-*Depends on: Task 9, open question Q3 (path discrimination) and Q4 (session handling) resolved*
+*Depends on: Task 9*
 
 **Files:**
 - `internal/mcp-router/request_handlers.go`
@@ -263,8 +264,8 @@ make lint
 - [ ] `A2ARequest` struct: `ID any`, `JSONRPC string`, `Method string`, `Params map[string]any`
 - [ ] `parseA2ARequest(body []byte) (*A2ARequest, error)`
 - [ ] `RouteA2ARequest()`: validates session, switches on `message/send`/`tasks/get`/`tasks/cancel`
-- [ ] `HandleA2ATaskSend()`: extracts skill → `A2ABroker.GetAgentInfo()` → sets `:authority`, `:path`, `x-a2a-agent` → `isStreamingMethod()` sets `ModeOverride`
-- [ ] Unknown method → JSON-RPC `-32601`; missing session → 401; unknown skill → JSON-RPC `-32602`
+- [ ] `HandleA2ATaskSend()`: reads agent from `x-a2a-agent` (set at headers phase by `GetAgentByPrefix()`) → `:authority` already set → `isStreamingMethod()` sets `ModeOverride`
+- [ ] Unknown method → JSON-RPC `-32601`; missing session → 401; unregistered path prefix → JSON-RPC `-32602`
 - [ ] MCP path (`/mcp` traffic) completely unaffected — regression tests pass
 - [ ] Unit tests cover all branches above
 
@@ -272,10 +273,10 @@ make lint
 ```bash
 make test-unit
 # deploy and test end-to-end:
-curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
+curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a/weather \
   -H "mcp-session-id: <jwt>" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"skill":"weather_forecast","message":{...}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{...}}}'
 ```
 
 ---
@@ -354,11 +355,11 @@ curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
 - `tests/e2e/test_cases.md` (updated)
 
 **Acceptance criteria:**
-- [ ] Agent card discovery: `GET /.well-known/agent.json` returns federated card with prefixed skills from the A2A test server
-- [ ] Task send: `message/send` with known skill routes to correct upstream, returns gateway task ID
+- [ ] Agent card discovery: `GET /.well-known/api-catalog` returns RFC 9264 catalog with agent links; `GET /a2a/weather/.well-known/agent.json` returns the test server's agent card
+- [ ] Task send: `message/send` to `/a2a/{prefix}` routes to correct upstream, returns gateway task ID
 - [ ] Task get: `tasks/get` with gateway task ID returns upstream result
 - [ ] Task cancel: `tasks/cancel` propagates to upstream, returns canceled state
-- [ ] Agent deregistration: deleting `A2AAgentRegistration` removes skills from federated card within one reconcile cycle
+- [ ] Agent deregistration: deleting `A2AAgentRegistration` removes the agent from the API catalog within one reconcile cycle
 
 **Verification:**
 ```bash
@@ -378,7 +379,7 @@ ginkgo -v --label-filter="A2A" ./tests/e2e/...
 **Acceptance criteria:**
 - [ ] Streaming: `message/send` with `Accept: text/event-stream` delivers SSE chunks with gateway task IDs
 - [ ] Auth: request without valid `mcp-session-id` returns 401 before reaching upstream
-- [ ] Unknown skill: `message/send` with unregistered skill prefix returns JSON-RPC `-32602`
+- [ ] Unknown path: `message/send` to unregistered `/a2a/{prefix}` returns JSON-RPC `-32602`
 - [ ] MCP regression: `tools/list` and `tools/call` work correctly after all A2A changes
 - [ ] All E2E tests pass: `ginkgo -v ./tests/e2e/... -- --gateway-host=mcp.127-0-0-1.sslip.io:8001`
 

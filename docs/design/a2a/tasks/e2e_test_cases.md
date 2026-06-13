@@ -5,23 +5,22 @@
 
 ---
 
-### [Happy,A2A] Agent card discovery returns federated skills from registered agents
+### [Happy,A2A] API Catalog lists registered agents and per-agent card returns correct skills
 
 When an `A2AAgentRegistration` is created with a valid HTTPRoute pointing to an A2A test server,
-and the test server's Agent Card lists two skills, the gateway's `GET /.well-known/agent.json`
-endpoint should return a federated Agent Card containing those two skills prefixed with the
-registration's `skillPrefix`. The gateway name and description in the returned card should reflect
-the gateway, not any individual upstream agent.
+the gateway's `GET /.well-known/api-catalog` endpoint should return an RFC 9264 catalog containing
+a link to the agent's endpoint at `/a2a/{prefix}`. A subsequent `GET /a2a/{prefix}/.well-known/agent.json`
+should return the upstream agent's Agent Card proxied through the gateway. The catalog entry should
+not appear until the registration is Ready.
 
 ---
 
 ### [Happy,A2A] message/send routes to the correct upstream agent and returns a gateway task ID
 
-When a client with a valid `mcp-session-id` sends a `message/send` request with a skill that
-matches a registered agent's prefix, the gateway should route the request to the correct upstream
-A2A agent, return a response containing a gateway-generated task ID (not the upstream's task ID),
-and store the task route mapping. The upstream agent should receive the request with the upstream
-task ID.
+When a client with a valid `mcp-session-id` sends a `message/send` request to a registered agent's
+path (`/a2a/{prefix}`), the gateway should route the request to the correct upstream A2A agent,
+return a response containing a gateway-generated task ID (not the upstream's task ID), and store
+the task route mapping. The upstream agent should receive the request with the upstream task ID.
 
 ---
 
@@ -51,51 +50,51 @@ terminal state (`completed`, `failed`, or `canceled`).
 
 ---
 
-### [A2A] Agent deregistration removes skills from federated card within one reconcile cycle
+### [A2A] Agent deregistration removes agent from API catalog within one reconcile cycle
 
-When an `A2AAgentRegistration` is deleted, the skills it contributed should no longer appear in
-`GET /.well-known/agent.json` within one reconcile cycle. A `message/send` request using a skill
-from the deregistered agent should return JSON-RPC error `-32602` (unknown skill) after the
+When an `A2AAgentRegistration` is deleted, the agent's link should no longer appear in
+`GET /.well-known/api-catalog` within one reconcile cycle. A `message/send` request to the
+deregistered agent's path should return JSON-RPC error `-32602` (unknown path prefix) after the
 reconcile completes.
 
 ---
 
-### [A2A] Multiple agents federated with distinct prefixes
+### [A2A] Multiple agents registered with distinct prefixes route independently
 
-When two `A2AAgentRegistrations` are created with different `skillPrefix` values, the federated
-Agent Card should contain skills from both agents, each correctly prefixed. A `message/send`
-request using a skill from agent A should route to agent A; a request using a skill from agent B
+When two `A2AAgentRegistrations` are created with different `skillPrefix` values, the API Catalog
+should list both agents at their respective paths (`/a2a/agent-a` and `/a2a/agent-b`). A
+`message/send` request to `/a2a/agent-a` should route to agent A; a request to `/a2a/agent-b`
 should route to agent B. There should be no cross-routing.
 
 ---
 
 ### [A2ASecurity] message/send without a valid session returns 401
 
-When a client sends a `message/send` request to `/a2a` without a `mcp-session-id` header, or with
-an expired or invalid JWT, the gateway should return 401 without forwarding anything to the
+When a client sends a `message/send` request to `/a2a/{prefix}` without a `mcp-session-id` header,
+or with an expired or invalid JWT, the gateway should return 401 without forwarding anything to the
 upstream agent. The upstream agent should receive no request.
 
 ---
 
-### [A2ASecurity] message/send with unknown skill returns JSON-RPC -32602
+### [A2ASecurity] message/send to unregistered path prefix returns JSON-RPC -32602
 
-When a client with a valid session sends a `message/send` request with a skill prefix that does
-not match any registered `A2AAgentRegistration`, the gateway should return a JSON-RPC error
-response with code `-32602` and not forward the request to any upstream agent.
+When a client with a valid session sends a `message/send` request to `/a2a/{prefix}` where the
+prefix does not match any registered `A2AAgentRegistration`, the gateway should return a JSON-RPC
+error response with code `-32602` and not forward the request to any upstream agent.
 
 ---
 
 ### [A2ASecurity] x-a2a-agent header injected by client is stripped
 
-When a client sends a request to `/a2a` with a manually-set `x-a2a-agent` header, the gateway
-should strip this header before processing. The routing decision should be based solely on the
-skill prefix in the request body, not on the injected header.
+When a client sends a request to `/a2a/{prefix}` with a manually-set `x-a2a-agent` header, the
+gateway should strip this header before processing. The routing decision should be based solely on
+the `:path` prefix, not on the injected header.
 
 ---
 
 ### [A2A] MCP tools/list and tools/call are unaffected by A2A changes
 
-When A2A support is fully deployed (agents registered, broker serving `/.well-known/agent.json`,
-router handling `/a2a`), a client performing MCP `tools/list` should receive the same federated
+When A2A support is fully deployed (agents registered, broker serving `/.well-known/api-catalog`,
+router handling `/a2a/{prefix}`), a client performing MCP `tools/list` should receive the same federated
 tool list as before. A `tools/call` request should route correctly to the MCP backend and return
 the expected result. No regressions in MCP behavior.
