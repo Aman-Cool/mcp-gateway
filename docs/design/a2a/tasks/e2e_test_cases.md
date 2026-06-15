@@ -10,8 +10,10 @@
 When an `A2AAgentRegistration` is created with a valid HTTPRoute pointing to an A2A test server,
 the gateway's `GET /.well-known/api-catalog` endpoint should return an RFC 9264 catalog containing
 a link to the agent's endpoint at `/a2a/{prefix}`. A subsequent `GET /a2a/{prefix}/.well-known/agent.json`
-should return the upstream agent's Agent Card proxied through the gateway. The catalog entry should
-not appear until the registration is Ready.
+should return the upstream agent's Agent Card proxied through the gateway, with the card's `url` field
+rewritten to the gateway path (`/a2a/{prefix}`) rather than the upstream address, so an unmodified A2A
+client following the card routes back through the gateway. The catalog entry should not appear until
+the registration is Ready.
 
 ---
 

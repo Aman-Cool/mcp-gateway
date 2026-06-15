@@ -58,7 +58,7 @@ make spell
 - `config/test-servers/kustomization.yaml` (updated)
 
 **Acceptance criteria:**
-- [ ] `GET /.well-known/agent.json` returns a valid AgentCard configurable via `AGENT_NAME`, `SKILLS`, `SKILL_PREFIX` env vars
+- [ ] `GET /.well-known/agent.json` returns a valid AgentCard (including a `url` field pointing at the server's own address) configurable via `AGENT_NAME`, `SKILLS`, `SKILL_PREFIX` env vars
 - [ ] `POST /a2a` dispatches `message/send` (returns completed task), `tasks/get`, `tasks/cancel`
 - [ ] SSE streaming for `message/send` when `Accept: text/event-stream`: three `working` events then `completed`
 - [ ] Kubernetes manifests follow `config/test-servers/server1-deployment.yaml` pattern
@@ -187,7 +187,8 @@ make test-unit
 **Acceptance criteria:**
 - [ ] `a2a.Broker` implements `config.Observer`: `OnConfigChange()` calls `SetAgents(cfg.ListA2AAgents())`
 - [ ] `FederatedCard()` has OTel span `"a2a.FederatedCard"` with `agent.count` attribute, following `HandleToolCall()` pattern
-- [ ] Unit tests: `OnConfigChange` triggers `SetAgents`; `ServeAgentCard` with unreachable upstream skips gracefully; `GetAgentByPrefix` lookup
+- [ ] `ServeAgentCard()` rewrites the upstream card's `url` field to the gateway path (`/a2a/{prefix}`) before returning it
+- [ ] Unit tests: `OnConfigChange` triggers `SetAgents`; `ServeAgentCard` with unreachable upstream skips gracefully; `ServeAgentCard` rewrites the card `url` to the gateway path; `GetAgentByPrefix` lookup
 - [ ] `go test -race ./internal/a2a/...` passes
 
 **Verification:**
@@ -355,7 +356,7 @@ curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
 - `tests/e2e/test_cases.md` (updated)
 
 **Acceptance criteria:**
-- [ ] Agent card discovery: `GET /.well-known/api-catalog` returns RFC 9264 catalog with agent links; `GET /a2a/weather/.well-known/agent.json` returns the test server's agent card
+- [ ] Agent card discovery: `GET /.well-known/api-catalog` returns RFC 9264 catalog with agent links; `GET /a2a/weather/.well-known/agent.json` returns the test server's agent card with its `url` rewritten to the gateway path (`/a2a/weather`)
 - [ ] Task send: `message/send` to `/a2a/{prefix}` routes to correct upstream, returns gateway task ID
 - [ ] Task get: `tasks/get` with gateway task ID returns upstream result
 - [ ] Task cancel: `tasks/cancel` propagates to upstream, returns canceled state

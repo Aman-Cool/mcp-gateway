@@ -17,15 +17,18 @@ delegation is a direct connection outside the gateway's policy perimeter.
 This design extends the MCP Gateway to support the A2A protocol alongside MCP. A new
 `A2AAgentRegistration` CRD allows operators to register upstream A2A agents with the gateway.
 The broker serves individual Agent Cards at `/a2a/{prefix}/.well-known/agent.json` and an RFC 9264
-API Catalog at `/.well-known/api-catalog` for multi-agent discovery. The ext_proc router detects
-A2A traffic by path prefix and routes `message/send`, `tasks/get`, and `tasks/cancel` requests to
-the correct upstream agent, rewriting task IDs at the gateway boundary.
+API Catalog at `/.well-known/api-catalog` for multi-agent discovery. Each served card has its `url`
+field rewritten to the gateway path, so unmodified A2A clients route through the gateway by following
+the card they already fetch. The ext_proc router detects A2A traffic by path prefix and routes
+`message/send`, `tasks/get`, and `tasks/cancel` requests to the correct upstream agent, rewriting
+task IDs at the gateway boundary.
 All existing MCP behaviour is unchanged. A2A support is entirely additive.
 
 ## Goals
 
 - Agent card discovery via RFC 9264 API Catalog at `/.well-known/api-catalog` linking to individual
-  agent cards at `/a2a/{prefix}/.well-known/agent.json` for each registered upstream A2A agent.
+  agent cards at `/a2a/{prefix}/.well-known/agent.json` for each registered upstream A2A agent, with
+  each card's `url` rewritten to the gateway path so unmodified A2A clients route through the gateway.
 - A2A request routing through the ext_proc pipeline: `message/send`, `tasks/get`, `tasks/cancel`
   dispatched to the correct upstream agent based on request path prefix (`/a2a/{prefix}`).
 - Gateway-owned task ID mapping so the client never sees upstream task IDs and task routing works
@@ -122,9 +125,21 @@ sequenceDiagram
     Gateway->>Broker: GET /a2a/weather/.well-known/agent.json
     Note over Broker: ServeAgentCard("weather")<br/>proxies to upstream agent card endpoint
     Broker->>Upstream: GET /.well-known/agent.json
-    Upstream-->>Broker: AgentCard{skills: [forecast, alerts, ...]}
-    Broker-->>Client: AgentCard{skills: [forecast, alerts, ...]}
+    Upstream-->>Broker: AgentCard{url: "http://weather-agent...", skills: [forecast, alerts, ...]}
+    Note over Broker: rewrite card url → gateway path<br/>"http://weather-agent..." → "https://<gateway>/a2a/weather"
+    Broker-->>Client: AgentCard{url: "https://<gateway>/a2a/weather", skills: [forecast, alerts, ...]}
 ```
+
+The broker rewrites the `url` field of each Agent Card to point at the gateway path
+(`/a2a/{prefix}`) before returning it. This is what lets unmodified A2A clients route
+through the gateway: a standard client reads the card's `url` and sends its
+`message/send` there, so the routing key lives in the card the gateway serves rather
+than in any header or out-of-band knowledge the client has to be given. The same
+mechanism is used by agentgateway (Solo.io, now under the Linux Foundation), which
+also rewrites agent card URLs to point at the gateway and routes per-agent rather than
+multiplexing on a skill. Multi-agent discovery under one base URL is an active topic
+upstream (a2aproject/A2A issues #641 and #883, discussion #166); the RFC 9264 API
+Catalog used here aligns with that direction.
 
 #### message/send Routing (non-streaming)
 
@@ -240,7 +255,7 @@ stateDiagram-v2
 | Component | Responsibility |
 |---|---|
 | Controller (`A2AReconciler`) | Watches `A2AAgentRegistration` CRDs. Resolves HTTPRoute → upstream endpoint → agent card URL. Writes `A2AAgent` config to the config Secret. Sets `Ready` and `AgentCardDiscovered` status conditions. |
-| Broker (`a2a.Broker`) | Implements `config.Observer`. On config change, calls `SetAgents()`. `ServeAPICatalog()` serves `GET /.well-known/api-catalog` (RFC 9264) listing all enabled agent endpoints. `ServeAgentCard(prefix)` serves `GET /a2a/{prefix}/.well-known/agent.json` by proxying to the upstream agent's card endpoint. `GetAgentByPrefix(prefix)` resolves a path prefix to the upstream agent. |
+| Broker (`a2a.Broker`) | Implements `config.Observer`. On config change, calls `SetAgents()`. `ServeAPICatalog()` serves `GET /.well-known/api-catalog` (RFC 9264) listing all enabled agent endpoints. `ServeAgentCard(prefix)` serves `GET /a2a/{prefix}/.well-known/agent.json` by proxying to the upstream agent's card endpoint, rewriting the card's `url` field to the gateway path (`/a2a/{prefix}`) so unmodified A2A clients route back through the gateway. `GetAgentByPrefix(prefix)` resolves a path prefix to the upstream agent. |
 | Router (`ExtProcServer`) | At the `RequestHeaders` phase: detects A2A traffic by `:path` prefix; for `message/send`, extracts agent prefix from `:path`, calls `A2ABroker.GetAgentByPrefix()`, generates a gateway task ID, sets `:authority` to the resolved agent hostname, sets `x-a2a-agent` and `x-a2a-task-id` headers. At the `RequestBody` phase: validates session JWT; for `tasks/get`/`tasks/cancel`, calls `ResolveTaskRoute()` to look up the upstream task ID, rewrites gateway task ID in request body to upstream task ID. At the `ResponseHeaders` phase: for all A2A requests, sets `ModeOverride ResponseBodyMode=BUFFERED` (non-streaming) or `STREAMED` (SSE) when `status == 200`. At the `ResponseBody` phase: for non-streaming `message/send`, parses upstream task ID from `result.id`, calls `StoreTaskRoute(gatewayTaskID, TaskRoute{...})`, rewrites upstream task ID to gateway task ID; for `tasks/get` responses, rewrites result task ID back to gateway task ID. `a2aSSEPassthrough.Process()` handles streaming: on first chunk stores `TaskRoute` and rewrites task IDs; on subsequent chunks rewrites only. |
 | Config (`MCPServersConfig`) | Stores `A2AAgents []*A2AAgent` alongside `Servers`. `SetA2AAgents()`, `ListA2AAgents()` provide thread-safe access under the existing `sync.RWMutex`. `Notify()` delivers A2A agent list to observers. |
 | Config Secret (`SecretReaderWriter`) | `UpsertA2AAgent()` and `RemoveA2AAgent()` follow the existing read-modify-write pattern with `retry.RetryOnConflict()`. `BrokerConfig` YAML gains an `a2aAgents` key. |
