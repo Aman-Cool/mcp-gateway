@@ -55,7 +55,7 @@ func init() {
 func main() {
 	var loglevel int
 	var logFormat string
-	flag.IntVar(&loglevel, "log-level", int(slog.LevelInfo), "log level: 0=info, 8=error, -4=debug")
+	flag.IntVar(&loglevel, "log-level", int(slog.LevelInfo), "log level: 0=info, 4=warn, 8=error, -4=debug")
 	flag.StringVar(&logFormat, "log-format", "txt", "log format: txt or json")
 	flag.Parse()
 
