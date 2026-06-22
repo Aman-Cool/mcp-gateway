@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	mcpotel "github.com/Kuadrant/mcp-gateway/internal/otel"
 	redis "github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -17,8 +18,6 @@ import (
 const clientElicitationPrefix = "clientelicitation:"
 
 const userTokenFieldPrefix = "token:"
-
-const sessionMeterName = "mcp-session"
 
 // Cache implements a cache
 type Cache struct {
@@ -274,10 +273,10 @@ func NewCache(opts ...func(*Cache)) (*Cache, error) {
 		opt(c)
 	}
 	if c.extClient != nil {
-		m := otel.GetMeterProvider().Meter(sessionMeterName)
+		m := otel.GetMeterProvider().Meter(mcpotel.SessionMeterName)
 		var err error
 		if c.opDuration, err = m.Float64Histogram(
-			"mcp.session.op.duration",
+			mcpotel.MetricSessionOpDuration,
 			metric.WithDescription("duration of Redis session store operations"),
 			metric.WithUnit("s"),
 			metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
