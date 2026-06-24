@@ -336,8 +336,8 @@ func (s *ExtProcServer) HandleToolCall(ctx context.Context, mcpReq *MCPRequest) 
 			[]*corev3.HeaderValueOption{
 				{
 					Header: &corev3.HeaderValue{
-						Key:   "mcp-session-id",
-						Value: mcpReq.GetSessionID(),
+						Key:      "mcp-session-id",
+						RawValue: []byte(mcpReq.GetSessionID()),
 					},
 				},
 			},
@@ -390,8 +390,8 @@ func (s *ExtProcServer) HandleToolCall(ctx context.Context, mcpReq *MCPRequest) 
 					[]*corev3.HeaderValueOption{
 						{
 							Header: &corev3.HeaderValue{
-								Key:   "mcp-session-id",
-								Value: mcpReq.GetSessionID(),
+								Key:      "mcp-session-id",
+								RawValue: []byte(mcpReq.GetSessionID()),
 							},
 						},
 					},
@@ -472,8 +472,8 @@ func (s *ExtProcServer) HandlePromptGet(ctx context.Context, mcpReq *MCPRequest)
 			[]*corev3.HeaderValueOption{
 				{
 					Header: &corev3.HeaderValue{
-						Key:   "mcp-session-id",
-						Value: mcpReq.GetSessionID(),
+						Key:      "mcp-session-id",
+						RawValue: []byte(mcpReq.GetSessionID()),
 					},
 				},
 			},

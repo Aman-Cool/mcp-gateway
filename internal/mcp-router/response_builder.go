@@ -102,6 +102,13 @@ func (rb *ResponseBuilder) WithImmediateResponse(statusCode int32, message strin
 				},
 				Body:    []byte(message),
 				Details: fmt.Sprintf("ext-proc error: %s", message),
+				Headers: &eppb.HeaderMutation{
+					SetHeaders: []*basepb.HeaderValueOption{
+						{
+							Header: &basepb.HeaderValue{Key: "content-type", RawValue: []byte("text/plain")},
+						},
+					},
+				},
 			},
 		},
 	})
@@ -114,7 +121,7 @@ func (rb *ResponseBuilder) WithImmediateJSONRPCResponse(statusCode int32, setHea
 	allHeaders := make([]*basepb.HeaderValueOption, 0, len(setHeaders)+1)
 	allHeaders = append(allHeaders, setHeaders...)
 	allHeaders = append(allHeaders, &basepb.HeaderValueOption{
-		Header: &basepb.HeaderValue{Key: "content-type", Value: "text/event-stream"},
+		Header: &basepb.HeaderValue{Key: "content-type", RawValue: []byte("text/event-stream")},
 	})
 	rb.response = append(rb.response, &eppb.ProcessingResponse{
 		Response: &eppb.ProcessingResponse_ImmediateResponse{
