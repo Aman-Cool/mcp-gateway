@@ -1350,4 +1350,69 @@ var _ = Describe("MCP Gateway Registration Happy Path", func() {
 			g.Expect(VerifyMCPServerRegistrationReady(ctx, k8sClient, registeredServer.Name, registeredServer.Namespace)).To(BeNil())
 		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
 	})
+
+	It("[Full] tools and prompts re-populate after gateway restart no redis", func() {
+		deploymentName := "mcp-gateway"
+
+		By("Registering an MCPServerRegistration with tools and prompts")
+		registration := NewMCPServerResourcesWithDefaults("restart-test", k8sClient).
+			WithBackendTarget(sharedMCPTestServer1, 9090).WithPrefix("restart_").Build()
+		testResources = append(testResources, registration.GetObjects()...)
+		registeredServer := registration.Register(ctx)
+
+		By("Waiting for the server to become ready")
+		Eventually(func(g Gomega) {
+			g.Expect(VerifyMCPServerRegistrationReady(ctx, k8sClient, registeredServer.Name, registeredServer.Namespace)).To(BeNil())
+		}, TestTimeoutLong, TestRetryInterval).To(Succeed())
+
+		By("Verifying tools are present before restart")
+		WaitForToolsWithPrefix(ctx, mcpGatewayClient, registeredServer.Spec.Prefix)
+
+		By("Verifying prompts are present before restart")
+		WaitForPromptsWithPrefix(ctx, mcpGatewayClient, registeredServer.Spec.Prefix)
+
+		By("Closing the MCP client before restart")
+		Expect(mcpGatewayClient.Close()).To(Succeed())
+
+		By("Restarting the mcp-gateway deployment")
+		Expect(RestartDeploymentAndWait(ctx, SystemNamespace, deploymentName)).To(Succeed())
+
+		By("Verifying tools re-populate and tool invocation works after restart")
+		toolName := fmt.Sprintf("%s%s", registeredServer.Spec.Prefix, "greet")
+		Eventually(func(g Gomega) {
+			sessionID, err := mcpInitialize(ctx, gatewayURL, nil)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(sessionID).NotTo(BeEmpty())
+
+			err = mcpNotifyInitialized(ctx, gatewayURL, sessionID, nil)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			_, tools, err := mcpListTools(ctx, gatewayURL, sessionID, nil)
+			g.Expect(err).NotTo(HaveOccurred())
+			hasPrefix := false
+			for _, t := range tools {
+				if strings.HasPrefix(t, registeredServer.Spec.Prefix) {
+					hasPrefix = true
+					break
+				}
+			}
+			g.Expect(hasPrefix).To(BeTrue(), "tools with prefix %q should exist after restart", registeredServer.Spec.Prefix)
+
+			_, prompts, err := mcpListPrompts(ctx, gatewayURL, sessionID, nil)
+			g.Expect(err).NotTo(HaveOccurred())
+			hasPromptPrefix := false
+			for _, p := range prompts {
+				if strings.HasPrefix(p, registeredServer.Spec.Prefix) {
+					hasPromptPrefix = true
+					break
+				}
+			}
+			g.Expect(hasPromptPrefix).To(BeTrue(), "prompts with prefix %q should exist after restart", registeredServer.Spec.Prefix)
+
+			_, content, err := mcpCallTool(ctx, gatewayURL, sessionID, toolName, map[string]any{"name": "restart-test"}, nil)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(content).NotTo(BeEmpty())
+			g.Expect(content[0].Text).To(Equal("Hi restart-test"))
+		}, TestTimeoutLong, TestRetryInterval).Should(Succeed())
+	})
 })
