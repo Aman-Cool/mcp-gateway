@@ -153,6 +153,50 @@ Catalog (served as an RFC 9264 Linkset) used here aligns with that direction.
 **[OPEN: discovery convention is held deliberately loose — commit to the RFC 9727 catalog now vs
 track upstream and keep it light. David endorsed holding it loosely; pending Jason/Craig.]**
 
+#### Upstream Agent Card sync (no card-change push)
+
+A2A defines **no card-change notification** — none of its ten methods (§7) is a server-initiated
+"agent card changed" push, and the AgentCard carries no cache/ETag hints (only a provider-defined
+`version`). This differs structurally from MCP, where the broker holds a persistent connection and the
+upstream pushes `notifications/tools/list_changed` (`internal/broker/upstream/manager.go:265-273`) for
+near-instant updates. A2A has no such channel and no persistent discovery connection, so the gateway
+**must poll**.
+
+The broker's `A2AAgentManager` therefore mirrors only the **poll half** of `MCPManager`: a ticker
+re-fetches each agent's card on a configurable interval (reusing the existing `--mcp-check-interval` /
+`managerTickerInterval`, default 1 min) and re-publishes the cached card on change. There is no
+notification half to mirror and no persistent connection, so the A2A manager is simpler than
+`MCPManager` — a periodic HTTP GET, no session, no subscription.
+
+The poll is kept cheap so the interval can stay short:
+
+- **Conditional GET.** The re-fetch sends `If-None-Match`/`If-Modified-Since`; an agent server that emits
+  `ETag`/`Last-Modified` returns `304 Not Modified` (no body) when unchanged.
+- **Change detection (act only on change).** Layered, cheapest first: a `304` (agent supports
+  conditional GET) means unchanged; else compare the card `version`; else compare a SHA-256 of the
+  normalized card body — which catches providers that don't bump `version` and changes beyond skills
+  (`capabilities`, input/output modes, security schemes). On no change the manager does nothing: no
+  allocation, no cache swap.
+
+The refresh updates the broker's **in-memory** card cache (a swap under the manager's `RWMutex`); it does
+**not** write the config Secret. A 60s poll therefore never thrashes the Secret — the Secret is written
+by the controller only on reconcile events (agent add/remove, credential change) via `UpsertA2AAgent()` →
+`SetAgents()` → `Notify()`, a flow separate from card content. Where "act only on change" earns its keep
+is the controller's `discoveredSkills` status: if the controller re-fetches to refresh that count it must
+skip the status `Update` when `version`/hash is unchanged (the same no-op-on-change discipline
+`MCPServer.ConfigChanged()` already applies), or it thrashes the API server and its own reconcile loop
+every interval.
+
+**Staleness bound.** A skill added upstream appears at `GET /a2a/{prefix}/.well-known/agent-card.json`
+within ≤ one tick (default 1 min). Skills live in the **per-agent card**, not the API Catalog (which
+lists only agent *endpoints*), so a skill change is a per-agent-card refresh; agent add/remove is the
+separate, reconcile-driven path. The controller's reconcile-time fetch is only a status snapshot
+(`AgentCardDiscovered`, `discoveredSkills`) — the live serving refresh is the broker ticker.
+
+A client-supplied cache-busting query param is **not** used: A2A clients don't send one, it would not
+force an upstream re-fetch unless explicitly wired, and wiring it would let any client trigger unbounded
+upstream fetches (a DoS vector). The bounded TTL poll is the sync mechanism.
+
 #### message/send Routing (non-streaming)
 
 ```mermaid
