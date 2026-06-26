@@ -1,7 +1,7 @@
 // a2a-test-server is an A2A protocol test server used by e2e tests.
 // It serves an Agent Card at the v0.3.0 well-known path (plus the legacy
-// alias) and handles message/send, message/stream, tasks/get and
-// tasks/cancel as JSON-RPC 2.0 over HTTP, with SSE streaming support.
+// alias) and handles message/send, message/stream, tasks/get, tasks/cancel
+// and tasks/resubscribe as JSON-RPC 2.0 over HTTP, with SSE streaming support.
 //
 // Behaviour is driven by the incoming message text:
 //   - text containing "slow" starts the task in "working" state and
@@ -283,6 +283,8 @@ func (s *server) handleA2A(w http.ResponseWriter, r *http.Request) {
 		s.handleGet(w, req)
 	case "tasks/cancel":
 		s.handleCancel(w, req)
+	case "tasks/resubscribe":
+		s.handleResubscribe(w, req)
 	default:
 		writeRPCError(w, req.ID, -32601, "method not found")
 	}
@@ -530,6 +532,78 @@ func streamFileArtifact(send func(any), t *task, b64 string) {
 			Kind:      "artifact-update",
 		})
 	}
+}
+
+func (s *server) handleResubscribe(w http.ResponseWriter, req rpcRequest) {
+	var params taskIDParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.ID == "" {
+		writeRPCError(w, req.ID, -32602, "invalid params: id required")
+		return
+	}
+	s.mu.Lock()
+	t, ok := s.tasks[params.ID]
+	s.mu.Unlock()
+	if !ok {
+		writeRPCError(w, req.ID, -32001, "task not found")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeRPCError(w, req.ID, -32603, "streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	send := func(result any) {
+		data, err := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
+		if err != nil {
+			log.Printf("failed to marshal sse event: %v", err)
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	// reconnect: replay the current task state. tasks/resubscribe is a streaming
+	// method, so an already-terminal task still gets an SSE final event, not a
+	// buffered response. a still-working task gets a couple of working updates
+	// and then the terminal event; the loop is bounded so it cannot hang if the
+	// background completion never fires.
+	send(t)
+	s.mu.Lock()
+	working := !isTerminal(t.Status.State)
+	s.mu.Unlock()
+	for i := 0; working && i < 2; i++ {
+		time.Sleep(s.streamDelay)
+		s.mu.Lock()
+		working = !isTerminal(t.Status.State)
+		s.mu.Unlock()
+		if !working {
+			break
+		}
+		send(statusUpdateEvent{
+			TaskID:    t.ID,
+			ContextID: t.ContextID,
+			Status:    taskStatus{State: stateWorking, Timestamp: now()},
+			Kind:      "status-update",
+		})
+	}
+	s.mu.Lock()
+	if !isTerminal(t.Status.State) {
+		t.Status = taskStatus{State: stateCompleted, Timestamp: now()}
+	}
+	finalState := t.Status.State
+	s.mu.Unlock()
+	send(statusUpdateEvent{
+		TaskID:    t.ID,
+		ContextID: t.ContextID,
+		Status:    taskStatus{State: finalState, Timestamp: now()},
+		Final:     true,
+		Kind:      "status-update",
+	})
 }
 
 func (s *server) handleGet(w http.ResponseWriter, req rpcRequest) {
