@@ -52,7 +52,8 @@ All existing MCP behaviour is unchanged. A2A support is entirely additive.
   routing approach delivers working A2A support without modifying the scheduler. Native extension
   is the longer-term architectural direction.
 - Webhook-based push notifications for async task completion callbacks. Polling via `tasks/get` is
-  in scope; push is not.
+  in scope; push is not — but the secure **webhook-relay** architecture (so the agent can't call the
+  client directly, outside the policy perimeter) is sketched in [Future Considerations](#future-considerations).
 - Skill-level JWT filtering (`x-a2a-authorized`) as an enforced capability in the PoC. The mechanism
   is designed in [Policy Enforcement](#policy-enforcement) and deferred to post-PoC; note it is a
   discovery/visibility control, not an access boundary — the enforceable unit is the agent.
@@ -731,8 +732,29 @@ it is visibility-only — the agent, not the skill, is the access boundary.
 `a2a.router.task.routing` (counter), `a2a.broker.agent_card.fetch.duration` (histogram),
 `a2a.router.task_store.operations` (counter with hit/miss labels).
 
-**Webhook-based push notifications.** The A2A spec supports push notification callbacks for async
-task completion. This requires the gateway to act as a notification relay and is deferred.
+**Webhook-based push notifications (relay architecture).** A2A's `tasks/pushNotificationConfig/set`
+lets a client register a webhook `url` that the **agent** POSTs to when a task updates
+(`PushNotificationConfig{url, token, id, authentication}`, §7.5). Forwarding this config to the agent
+verbatim would have the agent call the client's webhook **directly** — outside the gateway entirely: no
+AuthPolicy, no RateLimitPolicy, no observability, and the callback payload would carry **upstream** task
+IDs, breaking task-ID isolation. To support push securely the gateway must act as a **webhook relay**,
+reusing the mechanisms it already uses for the card `url` and task IDs:
+
+1. **Intercept `set`.** Rewrite `pushNotificationConfig.url` to a gateway-internal callback
+   (`/a2a/push/{callbackID}`) and store `{callbackID → client url, client token/authentication,
+   gatewayTaskID}` beside the `TaskRoute`. Replace `token`/`authentication` with a **gateway-issued**
+   credential so the agent authenticates to the gateway's webhook, not the client's. Forward the
+   rewritten config to the agent.
+2. **Agent → gateway webhook.** The agent POSTs task updates to `/a2a/push/{callbackID}` — a normal
+   gateway ingress, so AuthPolicy, RateLimitPolicy, and tracing (`a2a.task.id`) all apply. The gateway
+   validates the gateway-issued credential, rewrites upstream→gateway task IDs in the payload (the same
+   buffered rewrite as `tasks/get`), then forwards to the client's real webhook using the client's
+   originally-configured `token`/`authentication`, so the client validates authenticity via the `token`
+   it set.
+
+This keeps both legs inside the policy perimeter and preserves task-ID and credential isolation
+end-to-end. It is deferred (polling via `tasks/get` covers the PoC); the architecture is recorded so the
+extension is additive when prioritized.
 
 ## Execution
 
