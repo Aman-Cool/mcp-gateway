@@ -186,7 +186,7 @@ make test-unit
 
 **Acceptance criteria:**
 - [ ] `a2a.Broker` implements `config.Observer`: `OnConfigChange()` calls `SetAgents(cfg.ListA2AAgents())`
-- [ ] `FederatedCard()` has OTel span `"a2a.FederatedCard"` with `agent.count` attribute, following `HandleToolCall()` pattern
+- [ ] `ServeAPICatalog()` has OTel span `"a2a.ServeAPICatalog"` with `agent.count` attribute, following `HandleToolCall()` pattern
 - [ ] `A2AAgentManager` caches the upstream card with a ticker refresh (mirroring `MCPManager`), serving stale-on-error; `ServeAgentCard()` serves the cached card with its `url` rewritten to the gateway path (`/a2a/{prefix}`) — not a per-request upstream proxy
 - [ ] Card refresh is poll-only (A2A has no card-change push): ticker re-fetch with conditional GET (`If-None-Match`/`If-Modified-Since`) + `version`/SHA-256 change detection; act only on change (in-memory cache swap under RWMutex, no Secret write); staleness bound = ticker interval (reuse `managerTickerInterval`, default 1 min)
 - [ ] If the controller re-fetches to refresh `discoveredSkills`, it skips the status `Update` when `version`/hash is unchanged (reuse the `ConfigChanged()` no-op discipline)
@@ -344,7 +344,6 @@ make test-unit
 ```bash
 make test-unit
 curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
-  -H "Accept: text/event-stream" \
   -H "Authorization: Bearer <oauth-token>" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"message/stream","params":{...}}'

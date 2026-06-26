@@ -7,9 +7,9 @@ tools from multiple upstream MCP servers. As agentic architectures grow, a secon
 horizontal one. Agents increasingly delegate long-running work to other agents, discover peer
 capabilities, and coordinate asynchronously over tasks that may run for seconds or days.
 
-The Agent-to-Agent (A2A) protocol standardises this inter-agent communication layer. Today, A2A
+The Agent-to-Agent (A2A) protocol standardizes this inter-agent communication layer. Today, A2A
 traffic bypasses the gateway entirely. There is no AuthPolicy enforcement, no RateLimitPolicy, no
-centralised agent card discovery, and no logging of inter-agent interactions. Every agent-to-agent
+centralized agent card discovery, and no logging of inter-agent interactions. Every agent-to-agent
 delegation is a direct connection outside the gateway's policy perimeter.
 
 ## Summary
@@ -23,7 +23,7 @@ card has its `url` field rewritten to the gateway path, so unmodified A2A client
 gateway by following the card they already fetch. The ext_proc router detects A2A traffic by path
 prefix and routes `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, and
 `tasks/resubscribe` requests to the correct upstream agent, rewriting task IDs at the gateway boundary.
-All existing MCP behaviour is unchanged. A2A support is entirely additive.
+All existing MCP behavior is unchanged. A2A support is entirely additive.
 
 ## Goals
 
@@ -64,14 +64,14 @@ All existing MCP behaviour is unchanged. A2A support is entirely additive.
 ### When a platform engineer deploys a new A2A agent
 
 When a platform engineer has an upstream A2A agent running in their cluster, they want to register
-it with the gateway so that clients can discover it via the federated agent card and send tasks
+it with the gateway so that clients can discover it via the API Catalog and send tasks
 through the gateway, so that all inter-agent traffic is subject to the same AuthPolicy and
 RateLimitPolicy as MCP traffic.
 
 ### When an MCP client application wants to discover available agents
 
 When an MCP client application wants to discover available agents behind the gateway, it wants to
-query `/.well-known/api-catalog` (RFC 9264) and receive links to each registered agent's endpoint
+query `/.well-known/api-catalog` (RFC 9727) and receive links to each registered agent's endpoint
 at `/a2a/{prefix}`, then fetch each agent's card at `/a2a/{prefix}/.well-known/agent-card.json`, so that
 it can discover all registered agents without knowing their upstream addresses.
 
@@ -90,10 +90,10 @@ streamed events, so that it can display progress without polling.
 
 ### When a platform engineer removes an A2A agent
 
-When a platform engineer deletes an `A2AAgentRegistration`, they want the skills from that agent
-to disappear from the federated Agent Card within one reconcile cycle and for in-flight tasks to
-complete or return an appropriate error, so that the gateway accurately reflects available agents
-without requiring a deployment restart.
+When a platform engineer deletes an `A2AAgentRegistration`, they want that agent to disappear from
+the API Catalog within one reconcile cycle and for in-flight tasks to complete or return an
+appropriate error, so that the gateway accurately reflects available agents without requiring a
+deployment restart.
 
 ### When a client sends a request without valid auth
 
@@ -221,7 +221,7 @@ sequenceDiagram
     Note over Router: non-streaming A2A, status == 200<br/>set ModeOverride: ResponseBodyMode=BUFFERED
     Router-->>Envoy: HeadersResponse with ModeOverride
     Envoy->>Router: ProcessingRequest_ResponseBody<br/>body: {jsonrpc: "2.0", result: {id: "upstream-abc", ...}}
-    Note over Router: parse upstream task ID from result.id<br/>StoreTaskRoute(gatewayTaskID, TaskRoute{serverName, "upstream-abc"})<br/>rewrite body: "upstream-abc" → "gateway-123"
+    Note over Router: parse upstream task ID from result.id<br/>StoreTaskRoute(gatewayTaskID, TaskRoute{agentName, "upstream-abc"})<br/>rewrite body: "upstream-abc" → "gateway-123"
     Router-->>Client: BodyResponse: {result: {id: "gateway-123", ...}}
 ```
 
