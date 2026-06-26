@@ -58,15 +58,15 @@ make spell
 - `config/test-servers/kustomization.yaml` (updated)
 
 **Acceptance criteria:**
-- [ ] `GET /.well-known/agent.json` returns a valid AgentCard (including a `url` field pointing at the server's own address) configurable via `AGENT_NAME`, `SKILLS`, `SKILL_PREFIX` env vars
-- [ ] `POST /a2a` dispatches `message/send` (returns completed task), `tasks/get`, `tasks/cancel`
-- [ ] SSE streaming for `message/send` when `Accept: text/event-stream`: three `working` events then `completed`
+- [ ] `GET /.well-known/agent-card.json` (v0.3.0 §5.3; also serve `/.well-known/agent.json` as a v0.2 alias) returns a valid AgentCard (including a `url` field pointing at the server's own address) configurable via `AGENT_NAME`, `SKILLS`, `AGENT_PREFIX` env vars
+- [ ] `POST /a2a` dispatches `message/send` (returns a Task immediately), `tasks/get`, `tasks/cancel`, `tasks/resubscribe`
+- [ ] SSE streaming via `message/stream` (the v0.3.0 streaming method, §7.2 — NOT `message/send` + `Accept`): three `working` events then `completed`, task IDs in `result.id`/`result.taskId`
 - [ ] Kubernetes manifests follow `config/test-servers/server1-deployment.yaml` pattern
 - [ ] Server added to `config/test-servers/kustomization.yaml`
 
 **Verification:**
 ```bash
-curl http://a2a-server.mcp-test.svc.cluster.local:8080/.well-known/agent.json
+curl http://a2a-server.mcp-test.svc.cluster.local:8080/.well-known/agent-card.json
 curl -X POST http://a2a-server.mcp-test.svc.cluster.local:8080/a2a \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"type":"text","text":"hello"}]}}}'
@@ -86,7 +86,7 @@ curl -X POST http://a2a-server.mcp-test.svc.cluster.local:8080/a2a \
 - `docs/reference/a2aagentregistration.md`
 
 **Acceptance criteria:**
-- [ ] `skillPrefix` immutability CEL rule passes `make lint`
+- [ ] `agentPrefix` immutability CEL rule passes `make lint`
 - [ ] `agentCardURL` URL format validation present
 - [ ] `targetRef` uses `omitzero` (kubeapilinter requirement)
 - [ ] `make generate-all` produces no diff after this PR
@@ -187,7 +187,7 @@ make test-unit
 **Acceptance criteria:**
 - [ ] `a2a.Broker` implements `config.Observer`: `OnConfigChange()` calls `SetAgents(cfg.ListA2AAgents())`
 - [ ] `FederatedCard()` has OTel span `"a2a.FederatedCard"` with `agent.count` attribute, following `HandleToolCall()` pattern
-- [ ] `ServeAgentCard()` rewrites the upstream card's `url` field to the gateway path (`/a2a/{prefix}`) before returning it
+- [ ] `A2AAgentManager` caches the upstream card with a ticker refresh (mirroring `MCPManager`), serving stale-on-error; `ServeAgentCard()` serves the cached card with its `url` rewritten to the gateway path (`/a2a/{prefix}`) — not a per-request upstream proxy
 - [ ] Unit tests: `OnConfigChange` triggers `SetAgents`; `ServeAgentCard` with unreachable upstream skips gracefully; `ServeAgentCard` rewrites the card `url` to the gateway path; `GetAgentByPrefix` lookup
 - [ ] `go test -race ./internal/a2a/...` passes
 
@@ -210,7 +210,7 @@ make test-unit
 
 **Acceptance criteria:**
 - [ ] `a2aBroker` initialized in `main.go` and registered as observer: `cfg.RegisterObserver(a2aBroker)`
-- [ ] `/.well-known/api-catalog` and `/a2a/{prefix}/.well-known/agent.json` registered in `setUpHTTPServer()` after `/.well-known/oauth-protected-resource`
+- [ ] `/.well-known/api-catalog` (Content-Type `application/linkset+json`) and `/a2a/{prefix}/.well-known/agent-card.json` registered in `setUpHTTPServer()` after `/.well-known/oauth-protected-resource`
 - [ ] `A2ABroker a2a.Broker` field added to `ExtProcServer` struct in `createRouter()`
 - [ ] `make build` passes
 
@@ -236,7 +236,7 @@ curl http://mcp.127-0-0-1.sslip.io:8001/.well-known/api-catalog
 
 **Acceptance criteria:**
 - [ ] `isA2A` bool set in `Process()` at `RequestHeaders` phase via `strings.HasPrefix(requestPath, "/a2a")`
-- [ ] At `RequestHeaders` phase for `message/send`: extract agent prefix from `:path`, call `A2ABroker.GetAgentByPrefix()`, set `:authority` to agent hostname, set `x-a2a-agent` and `x-a2a-task-id` headers
+- [ ] At `RequestHeaders` phase: extract agent prefix from `:path`, call `A2ABroker.GetAgentByPrefix()`, set `:authority` to agent hostname + `x-a2a-agent`. Method-specific work (task-ID gen, `x-a2a-task-id`) is deferred to `RequestBody` — the JSON-RPC method is known only there
 - [ ] A2A header constants defined in `internal/headers/headers.go`: `A2AAgentHeader`, `A2ATaskIDHeader`, `A2AMethodHeader`
 - [ ] `WithA2AAgent()`, `WithA2ATaskID()`, `WithA2AMethod()` added to `HeadersBuilder`
 - [ ] `x-a2a-agent` and `x-a2a-task-id` added to `internalOnlyHeaders`
@@ -264,9 +264,9 @@ make lint
 **Acceptance criteria:**
 - [ ] `A2ARequest` struct: `ID any`, `JSONRPC string`, `Method string`, `Params map[string]any`
 - [ ] `parseA2ARequest(body []byte) (*A2ARequest, error)`
-- [ ] `RouteA2ARequest()`: validates session, switches on `message/send`/`tasks/get`/`tasks/cancel`
-- [ ] `HandleA2ATaskSend()`: reads agent from `x-a2a-agent` (set at headers phase by `GetAgentByPrefix()`) → `:authority` already set → `isStreamingMethod()` sets `ModeOverride`
-- [ ] Unknown method → JSON-RPC `-32601`; missing session → 401; unregistered path prefix → JSON-RPC `-32602`
+- [ ] `RouteA2ARequest()`: authenticates via OAuth principal (`ExtractSubClaim`), switches on `message/send`/`message/stream`/`tasks/get`/`tasks/cancel`/`tasks/resubscribe`
+- [ ] `HandleA2ATaskSend()`: generates the gateway task ID at `RequestBody`, sets `x-a2a-task-id`; `isStreamingMethod()` (`message/stream`/`tasks/resubscribe`) sets `ModeOverride`
+- [ ] Errors are `application/json` JSON-RPC (NOT SSE-framed): unknown method → `-32601`; unknown gateway task ID → `-32001 TaskNotFoundError` (§8.2); missing/invalid bearer rejected by AuthPolicy at the edge, empty principal → fail closed
 - [ ] MCP path (`/mcp` traffic) completely unaffected — regression tests pass
 - [ ] Unit tests cover all branches above
 
@@ -275,7 +275,7 @@ make lint
 make test-unit
 # deploy and test end-to-end:
 curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a/weather \
-  -H "mcp-session-id: <jwt>" \
+  -H "Authorization: Bearer <oauth-token>" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{...}}}'
 ```
@@ -303,9 +303,10 @@ defined here before this task merges.
 - [ ] `ResolveTaskRoute(ctx, gatewayTaskID string) (TaskRoute, bool, error)` implemented for in-memory and Redis
 - [ ] `DeleteTaskRoute(ctx, gatewayTaskID string) error` implemented for in-memory and Redis
 - [ ] `SessionCache` interface in `internal/mcp-router/server.go` updated with the above signatures
-- [ ] Redis key prefix `a2atask:`, TTL from `JWTManager.GetExpiresIn()` matching session TTL
+- [ ] Redis key prefix `a2atask:`, **fixed safety-net TTL decoupled from the JWT** (idmap pattern); primary cleanup via `DeleteTaskRoute()` on a terminal `TaskState`/`-32001`
+- [ ] `TaskRoute.Principal` set from the OAuth `sub`; `ResolveTaskRoute()` callers verify the requesting principal owns the task before routing
 - [ ] `HandleA2ATaskSend()` updated: generate gateway task ID, call `StoreTaskRoute()`, rewrite task ID in response body
-- [ ] `HandleA2ATaskGet()` and `HandleA2ATaskCancel()` call `ResolveTaskRoute()` to find upstream agent and rewrite ID
+- [ ] `HandleA2ATaskGet()`/`HandleA2ATaskCancel()`/`tasks/resubscribe` call `ResolveTaskRoute()`, verify principal ownership, find upstream agent and rewrite ID
 - [ ] Concurrency test: 100 goroutines reading and writing task routes with `-race`
 - [ ] `go test -race ./internal/session/...` passes
 
@@ -328,9 +329,10 @@ make test-unit
 
 **Acceptance criteria:**
 - [ ] `a2aSSEPassthrough` struct with `Process(ctx, chunk []byte) []byte` and `Flush(ctx) []byte`
-- [ ] `Process()` rewrites upstream task IDs to gateway task IDs in `data:` lines (JSON field `"id"`)
-- [ ] `HandleResponseHeaders()` sets `ModeOverride` with `ResponseBodyMode=STREAMED` when `isA2A && isStreamingA2AMethod()`
-- [ ] `Process()` loop handles `a2aPassthrough` in `ResponseBody` phase identical to `rewriter`
+- [ ] `Process()` rewrites upstream→gateway task IDs across `result.id`, `result.taskId`, and `history[].taskId` in `data:` lines (the field varies by event kind, §7.2)
+- [ ] `HandleResponseHeaders()` sets `ModeOverride ResponseBodyMode=STREAMED` when `isA2A && isStreamingA2AMethod()` (`message/stream`/`tasks/resubscribe`)
+- [ ] Non-streaming `message/send`/`tasks/get` use a separate BUFFERED full-body rewrite path; an A2A flag gates `Process()` continuing into `ResponseBody` (today it only continues when `rewriter != nil`)
+- [ ] `Process()` loop handles `a2aPassthrough` in `ResponseBody` phase like `rewriter`
 - [ ] Unit tests: SSE chunks pass through; upstream task IDs replaced with gateway task IDs; non-SSE responses unaffected
 
 **Verification:**
@@ -338,9 +340,9 @@ make test-unit
 make test-unit
 curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
   -H "Accept: text/event-stream" \
-  -H "mcp-session-id: <jwt>" \
+  -H "Authorization: Bearer <oauth-token>" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{...}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/stream","params":{...}}'
 # expect: SSE stream with gateway task IDs in all events
 ```
 
@@ -356,7 +358,7 @@ curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
 - `tests/e2e/test_cases.md` (updated)
 
 **Acceptance criteria:**
-- [ ] Agent card discovery: `GET /.well-known/api-catalog` returns RFC 9264 catalog with agent links; `GET /a2a/weather/.well-known/agent.json` returns the test server's agent card with its `url` rewritten to the gateway path (`/a2a/weather`)
+- [ ] Agent card discovery: `GET /.well-known/api-catalog` returns an RFC 9727 catalog (RFC 9264 Linkset) with agent links; `GET /a2a/weather/.well-known/agent-card.json` returns the test server's agent card with its `url` rewritten to the gateway path (`/a2a/weather`)
 - [ ] Task send: `message/send` to `/a2a/{prefix}` routes to correct upstream, returns gateway task ID
 - [ ] Task get: `tasks/get` with gateway task ID returns upstream result
 - [ ] Task cancel: `tasks/cancel` propagates to upstream, returns canceled state
@@ -378,8 +380,8 @@ ginkgo -v --label-filter="A2A" ./tests/e2e/...
 - `tests/e2e/a2a_task_test.go` (extend)
 
 **Acceptance criteria:**
-- [ ] Streaming: `message/send` with `Accept: text/event-stream` delivers SSE chunks with gateway task IDs
-- [ ] Auth: request without valid `mcp-session-id` returns 401 before reaching upstream
+- [ ] Streaming: `message/stream` delivers SSE chunks with gateway task IDs (across `result.id`/`result.taskId`)
+- [ ] Auth: request without a valid OAuth bearer returns 401 (AuthPolicy) before reaching upstream
 - [ ] Unknown path: `message/send` to unregistered `/a2a/{prefix}` returns JSON-RPC `-32602`
 - [ ] MCP regression: `tools/list` and `tools/call` work correctly after all A2A changes
 - [ ] All E2E tests pass: `ginkgo -v ./tests/e2e/... -- --gateway-host=mcp.127-0-0-1.sslip.io:8001`

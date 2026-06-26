@@ -16,28 +16,32 @@ delegation is a direct connection outside the gateway's policy perimeter.
 
 This design extends the MCP Gateway to support the A2A protocol alongside MCP. A new
 `A2AAgentRegistration` CRD allows operators to register upstream A2A agents with the gateway.
-The broker serves individual Agent Cards at `/a2a/{prefix}/.well-known/agent.json` and an RFC 9264
-API Catalog at `/.well-known/api-catalog` for multi-agent discovery. Each served card has its `url`
-field rewritten to the gateway path, so unmodified A2A clients route through the gateway by following
-the card they already fetch. The ext_proc router detects A2A traffic by path prefix and routes
-`message/send`, `tasks/get`, and `tasks/cancel` requests to the correct upstream agent, rewriting
-task IDs at the gateway boundary.
+The broker serves individual Agent Cards at `/a2a/{prefix}/.well-known/agent-card.json` (with
+`/.well-known/agent.json` kept as a v0.2 legacy alias) and an RFC 9727 API Catalog at
+`/.well-known/api-catalog` (served as an RFC 9264 Linkset) for multi-agent discovery. Each served
+card has its `url` field rewritten to the gateway path, so unmodified A2A clients route through the
+gateway by following the card they already fetch. The ext_proc router detects A2A traffic by path
+prefix and routes `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, and
+`tasks/resubscribe` requests to the correct upstream agent, rewriting task IDs at the gateway boundary.
 All existing MCP behaviour is unchanged. A2A support is entirely additive.
 
 ## Goals
 
-- Agent card discovery via RFC 9264 API Catalog at `/.well-known/api-catalog` linking to individual
-  agent cards at `/a2a/{prefix}/.well-known/agent.json` for each registered upstream A2A agent, with
-  each card's `url` rewritten to the gateway path so unmodified A2A clients route through the gateway.
-- A2A request routing through the ext_proc pipeline: `message/send`, `tasks/get`, `tasks/cancel`
-  dispatched to the correct upstream agent based on request path prefix (`/a2a/{prefix}`).
+- Agent card discovery via an RFC 9727 API Catalog at `/.well-known/api-catalog` (served as an RFC
+  9264 Linkset) linking to individual agent cards at `/a2a/{prefix}/.well-known/agent-card.json` for
+  each registered upstream A2A agent, with each card's `url` rewritten to the gateway path so
+  unmodified A2A clients route through the gateway.
+- A2A request routing through the ext_proc pipeline: `message/send`, `message/stream`, `tasks/get`,
+  `tasks/cancel`, `tasks/resubscribe` dispatched to the correct upstream agent based on request path
+  prefix (`/a2a/{prefix}`).
 - Gateway-owned task ID mapping so the client never sees upstream task IDs and task routing works
   correctly across multiple upstream agents.
-- SSE streaming passthrough for `message/send` when the client requests `Accept: text/event-stream`,
-  with upstream task IDs replaced by gateway task IDs in streamed events.
+- SSE streaming passthrough for `message/stream` (the v0.3.0 streaming method, §7.2) and
+  `tasks/resubscribe`, with upstream task IDs replaced by gateway task IDs in streamed events.
 - `A2AAgentRegistration` CRD and controller for registering upstream A2A agents via HTTPRoutes,
   consistent with the `MCPServerRegistration` pattern.
-- Session validation: A2A requests require a valid gateway session JWT (reusing `mcp-session-id`).
+- Authentication: A2A requests authenticate per request via an OAuth bearer (Kuadrant AuthPolicy on
+  `/a2a`); task ownership is scoped to the principal (`sub`), not a session.
 - E2E tests covering agent card discovery, task submission and completion, streaming, auth, and MCP
   regression.
 
@@ -66,7 +70,7 @@ RateLimitPolicy as MCP traffic.
 
 When an MCP client application wants to discover available agents behind the gateway, it wants to
 query `/.well-known/api-catalog` (RFC 9264) and receive links to each registered agent's endpoint
-at `/a2a/{prefix}`, then fetch each agent's card at `/a2a/{prefix}/.well-known/agent.json`, so that
+at `/a2a/{prefix}`, then fetch each agent's card at `/a2a/{prefix}/.well-known/agent-card.json`, so that
 it can discover all registered agents without knowing their upstream addresses.
 
 ### When an agent sends a long-running task through the gateway
@@ -78,9 +82,9 @@ access to upstream agents and all task interactions are mediated by the gateway.
 
 ### When an agent streams task progress
 
-When an agent sends a `message/send` request with `Accept: text/event-stream`, it wants to receive
-real-time task status updates as SSE events with consistent gateway task IDs across all streamed
-events, so that it can display progress without polling.
+When an agent sends a `message/stream` request (the v0.3.0 streaming method, §7.2), it wants to
+receive real-time task status updates as SSE events with consistent gateway task IDs across all
+streamed events, so that it can display progress without polling.
 
 ### When a platform engineer removes an A2A agent
 
@@ -89,9 +93,9 @@ to disappear from the federated Agent Card within one reconcile cycle and for in
 complete or return an appropriate error, so that the gateway accurately reflects available agents
 without requiring a deployment restart.
 
-### When a client sends a request without a valid session
+### When a client sends a request without valid auth
 
-When a client sends a `message/send` without a valid `mcp-session-id` JWT, the gateway should
+When a client sends a `message/send` without a valid OAuth bearer, the gateway's AuthPolicy should
 return a 401 without forwarding anything to the upstream agent, so that unauthenticated agents
 cannot invoke tasks.
 
@@ -100,9 +104,14 @@ cannot invoke tasks.
 ### Prerequisites
 
 - An `MCPGatewayExtension` is installed and a gateway deployment is running.
-- The client has completed MCP `initialize` with the gateway and holds a valid `mcp-session-id`
-  JWT. A2A requests reuse this session.
-  **[OPEN: Q4 — reuse mcp-session-id or separate A2A session? Needed before Week 8.]**
+- The client authenticates each A2A request with an OAuth 2.1 bearer token, validated by a Kuadrant
+  AuthPolicy on the `/a2a` route (the same per-request model MCP uses). Task ownership is scoped to
+  the authenticated principal (token `sub`), not a session.
+  **[OPEN: Q4 — confirm at the Week 8 sync. MCP 2026-07-28 (SEP-2567/SEP-2575) removes `initialize`
+  and `Mcp-Session-Id`, so A2A does NOT reuse `mcp-session-id`; it authenticates per-request via OAuth
+  and binds tasks to the principal (the router already reads `sub` via `ExtractSubClaim`). Open for
+  David: does any client-facing gateway token survive the stateless cut, and is `/a2a` the same OAuth
+  resource/audience as `/mcp` per RFC 8707? Prereq: AuthPolicy MUST be enforced on `/a2a`.]**
 - Upstream A2A agents are accessible from the gateway's network and implement A2A v0.3.0.
 - HTTPRoutes targeting upstream A2A agents are programmed and accepted by the gateway.
 
@@ -120,11 +129,11 @@ sequenceDiagram
     Client->>Gateway: GET /.well-known/api-catalog
     Gateway->>Broker: GET /.well-known/api-catalog
     Note over Broker: ServeAPICatalog() reads enabled agents
-    Broker-->>Client: RFC 9264 API Catalog<br/>{links: [{href: "/a2a/weather"}, {href: "/a2a/search"}]}
-    Client->>Gateway: GET /a2a/weather/.well-known/agent.json
-    Gateway->>Broker: GET /a2a/weather/.well-known/agent.json
-    Note over Broker: ServeAgentCard("weather")<br/>proxies to upstream agent card endpoint
-    Broker->>Upstream: GET /.well-known/agent.json
+    Broker-->>Client: RFC 9727 API Catalog (RFC 9264 Linkset)<br/>{links: [{href: "/a2a/weather"}, {href: "/a2a/search"}]}
+    Client->>Gateway: GET /a2a/weather/.well-known/agent-card.json
+    Gateway->>Broker: GET /a2a/weather/.well-known/agent-card.json
+    Note over Broker: ServeAgentCard("weather")<br/>serves cached card (ticker-refreshed, like MCPManager)
+    Broker->>Upstream: GET /.well-known/agent-card.json (periodic refresh, not per-request)
     Upstream-->>Broker: AgentCard{url: "http://weather-agent...", skills: [forecast, alerts, ...]}
     Note over Broker: rewrite card url → gateway path<br/>"http://weather-agent..." → "https://<gateway>/a2a/weather"
     Broker-->>Client: AgentCard{url: "https://<gateway>/a2a/weather", skills: [forecast, alerts, ...]}
@@ -138,8 +147,10 @@ than in any header or out-of-band knowledge the client has to be given. The same
 mechanism is used by agentgateway (Solo.io, now under the Linux Foundation), which
 also rewrites agent card URLs to point at the gateway and routes per-agent rather than
 multiplexing on a skill. Multi-agent discovery under one base URL is an active topic
-upstream (a2aproject/A2A issues #641 and #883, discussion #166); the RFC 9264 API
-Catalog used here aligns with that direction.
+upstream (a2aproject/A2A issues #641 and #883, discussion #166); the RFC 9727 API
+Catalog (served as an RFC 9264 Linkset) used here aligns with that direction.
+**[OPEN: discovery convention is held deliberately loose — commit to the RFC 9727 catalog now vs
+track upstream and keep it light. David endorsed holding it loosely; pending Jason/Craig.]**
 
 #### message/send Routing (non-streaming)
 
@@ -151,12 +162,12 @@ sequenceDiagram
     participant Broker as MCP Broker
     participant Upstream as Upstream A2A Agent
 
-    Client->>Envoy: POST /a2a/weather<br/>mcp-session-id: <jwt><br/>body: {method: "message/send", params: {...}}
+    Client->>Envoy: POST /a2a/weather<br/>Authorization: Bearer <token><br/>body: {method: "message/send", params: {...}}
     Envoy->>Router: ProcessingRequest_RequestHeaders<br/>:path = /a2a/weather
-    Note over Router: isA2A = true (path prefix)<br/>extract prefix "weather" from :path<br/>GetAgentByPrefix("weather") → weather agent<br/>generate gatewayTaskID<br/>set :authority = agent hostname<br/>set x-a2a-agent, x-a2a-task-id headers
+    Note over Router: isA2A = true (path prefix)<br/>extract prefix "weather" from :path<br/>GetAgentByPrefix("weather") → weather agent<br/>set :authority = agent hostname<br/>set x-a2a-agent header
     Router-->>Envoy: HeadersResponse with header mutations (continue)
     Envoy->>Router: ProcessingRequest_RequestBody
-    Note over Router: parse A2ARequest<br/>validateSession(mcp-session-id)<br/>method = "message/send" → record gatewayTaskID in context
+    Note over Router: parse A2ARequest (method known only here)<br/>authenticate via OAuth principal (sub)<br/>method = "message/send" → generate gatewayTaskID, set x-a2a-task-id
     Router-->>Envoy: BodyResponse (continue)
     Envoy->>Upstream: POST /a2a (routed by :authority)
     Upstream-->>Envoy: HTTP 200 OK
@@ -168,7 +179,10 @@ sequenceDiagram
     Router-->>Client: BodyResponse: {result: {id: "gateway-123", ...}}
 ```
 
-#### message/send Routing (SSE streaming)
+#### message/stream Routing (SSE streaming, §7.2)
+
+`message/stream` is the v0.3.0 streaming method (a distinct JSON-RPC method, not `message/send` with
+an `Accept` header). `tasks/resubscribe` (§7.9) reuses the same passthrough.
 
 ```mermaid
 sequenceDiagram
@@ -177,30 +191,30 @@ sequenceDiagram
     participant Router as ext_proc Router
     participant Upstream as Upstream A2A Agent
 
-    Client->>Envoy: POST /a2a/weather<br/>Accept: text/event-stream
+    Client->>Envoy: POST /a2a/weather<br/>body: {method: "message/stream", params: {...}}
     Envoy->>Router: ProcessingRequest_RequestHeaders<br/>:path = /a2a/weather
-    Note over Router: isA2A = true (path prefix)<br/>extract prefix "weather" from :path<br/>GetAgentByPrefix("weather") → weather agent<br/>generate gatewayTaskID<br/>set :authority = agent hostname<br/>set x-a2a-agent, x-a2a-task-id headers
+    Note over Router: isA2A = true (path prefix)<br/>extract prefix "weather" from :path<br/>GetAgentByPrefix("weather") → weather agent<br/>set :authority = agent hostname<br/>set x-a2a-agent header
     Router-->>Envoy: HeadersResponse with header mutations (continue)
     Envoy->>Router: ProcessingRequest_RequestBody
-    Note over Router: parse A2ARequest<br/>validateSession(mcp-session-id)<br/>method = "message/send" → record gatewayTaskID in context
+    Note over Router: parse A2ARequest<br/>authenticate via OAuth principal (sub)<br/>method = "message/stream" → generate gatewayTaskID, set x-a2a-task-id
     Router-->>Envoy: BodyResponse (continue)
     Envoy->>Upstream: POST /a2a (routed by :authority)
     Upstream-->>Envoy: HTTP 200 OK
     Envoy->>Router: ProcessingRequest_ResponseHeaders
-    Note over Router: isA2AStreamingMethod() == true, status == 200<br/>set ModeOverride: ResponseBodyMode=STREAMED<br/>init a2aSSEPassthrough(gatewayTaskID, serverName)
+    Note over Router: isA2AStreamingMethod() (message/stream, tasks/resubscribe), status == 200<br/>set ModeOverride: ResponseBodyMode=STREAMED<br/>init a2aSSEPassthrough(gatewayTaskID, serverName)
     Router-->>Envoy: HeadersResponse with ModeOverride
     loop SSE chunks
-        Upstream-->>Envoy: data: {"result": {"id": "upstream-abc", "status": "working"}}
+        Upstream-->>Envoy: data: {"result": {"id"/"taskId": "upstream-abc", ...}}
         Envoy->>Router: ProcessingRequest_ResponseBody
-        Note over Router: a2aSSEPassthrough.Process()<br/>first chunk: StoreTaskRoute(gatewayTaskID, TaskRoute{serverName, "upstream-abc"})<br/>all chunks: replace "upstream-abc" → "gateway-123"
+        Note over Router: a2aSSEPassthrough.Process()<br/>first event (kind=task): StoreTaskRoute(gatewayTaskID, TaskRoute{..., "upstream-abc"})<br/>rewrite upstream→gateway ID across result.id, result.taskId, history[].taskId
         Router-->>Envoy: BodyResponse with rewritten chunk
-        Envoy-->>Client: data: {"result": {"id": "gateway-123", "status": "working"}}
+        Envoy-->>Client: data: {"result": {... "gateway-123" ...}}
     end
-    Upstream-->>Envoy: data: {"result": {"id": "upstream-abc", "status": "completed", "final": true}}
+    Upstream-->>Envoy: data: {"result": {"taskId": "upstream-abc", "status": {"state": "completed"}, "final": true}}
     Envoy->>Router: ProcessingRequest_ResponseBody
-    Note over Router: a2aSSEPassthrough.Process()<br/>replace "upstream-abc" → "gateway-123"
+    Note over Router: a2aSSEPassthrough.Process()<br/>rewrite "upstream-abc" → "gateway-123"
     Router-->>Envoy: BodyResponse with rewritten chunk
-    Envoy-->>Client: data: {"result": {"id": "gateway-123", "status": "completed", "final": true}}
+    Envoy-->>Client: data: {"result": {"taskId": "gateway-123", "status": {"state": "completed"}, "final": true}}
 ```
 
 #### tasks/get Routing
@@ -217,7 +231,7 @@ sequenceDiagram
     Note over Router: isA2A = true (path prefix)<br/>extract prefix "weather" (confirms agent context)
     Router-->>Envoy: HeadersResponse (continue)
     Envoy->>Router: ProcessingRequest_RequestBody
-    Note over Router: validateSession()<br/>ResolveTaskRoute("gateway-123")<br/>→ TaskRoute{agentHostname, upstreamTaskID: "upstream-abc"}<br/>rewrite params.id: "gateway-123" → "upstream-abc"<br/>set :authority = agent hostname
+    Note over Router: authenticate (OAuth principal sub)<br/>ResolveTaskRoute("gateway-123") + verify principal owns task<br/>→ TaskRoute{agentHostname, upstreamTaskID: "upstream-abc"}<br/>rewrite params.id: "gateway-123" → "upstream-abc"<br/>set :authority = agent hostname
     Router-->>Envoy: BodyResponse with rewritten body + header mutations (continue)
     Envoy->>Upstream: POST /a2a<br/>body: {method: "tasks/get", params: {id: "upstream-abc"}}
     Upstream-->>Envoy: HTTP 200 OK
@@ -233,10 +247,12 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> submitted: message/send received by gateway
+    [*] --> submitted: message/send or message/stream received by gateway
     submitted --> working: upstream agent begins processing
-    working --> input_required: agent needs additional input
-    input_required --> working: client provides input
+    working --> input-required: agent needs additional input
+    input-required --> working: client provides input
+    working --> auth-required: agent needs additional authorization
+    auth-required --> working: client provides authorization
     working --> completed: task finished successfully
     working --> failed: task encountered an error
     working --> canceled: tasks/cancel received
@@ -247,7 +263,8 @@ stateDiagram-v2
     rejected --> [*]
 
     note right of submitted: gateway task ID generated at RequestBody\nStoreTaskRoute() called at ResponseBody
-    note right of completed: task route remains until\ngateway session expires
+    note right of rejected: A2A v0.3.0 §6.3 = 9 states (kebab-case);\n'unknown' is a sentinel for indeterminate state
+    note right of completed: task route deleted on terminal state;\nRedis safety-net TTL backstops crashes (idmap pattern)
 ```
 
 ### Component Responsibilities
@@ -255,12 +272,12 @@ stateDiagram-v2
 | Component | Responsibility |
 |---|---|
 | Controller (`A2AReconciler`) | Watches `A2AAgentRegistration` CRDs. Resolves HTTPRoute → upstream endpoint → agent card URL. Writes `A2AAgent` config to the config Secret. Sets `Ready` and `AgentCardDiscovered` status conditions. |
-| Broker (`a2a.Broker`) | Implements `config.Observer`. On config change, calls `SetAgents()`. `ServeAPICatalog()` serves `GET /.well-known/api-catalog` (RFC 9264) listing all enabled agent endpoints. `ServeAgentCard(prefix)` serves `GET /a2a/{prefix}/.well-known/agent.json` by proxying to the upstream agent's card endpoint, rewriting the card's `url` field to the gateway path (`/a2a/{prefix}`) so unmodified A2A clients route back through the gateway. `GetAgentByPrefix(prefix)` resolves a path prefix to the upstream agent. |
-| Router (`ExtProcServer`) | At the `RequestHeaders` phase: detects A2A traffic by `:path` prefix; for `message/send`, extracts agent prefix from `:path`, calls `A2ABroker.GetAgentByPrefix()`, generates a gateway task ID, sets `:authority` to the resolved agent hostname, sets `x-a2a-agent` and `x-a2a-task-id` headers. At the `RequestBody` phase: validates session JWT; for `tasks/get`/`tasks/cancel`, calls `ResolveTaskRoute()` to look up the upstream task ID, rewrites gateway task ID in request body to upstream task ID. At the `ResponseHeaders` phase: for all A2A requests, sets `ModeOverride ResponseBodyMode=BUFFERED` (non-streaming) or `STREAMED` (SSE) when `status == 200`. At the `ResponseBody` phase: for non-streaming `message/send`, parses upstream task ID from `result.id`, calls `StoreTaskRoute(gatewayTaskID, TaskRoute{...})`, rewrites upstream task ID to gateway task ID; for `tasks/get` responses, rewrites result task ID back to gateway task ID. `a2aSSEPassthrough.Process()` handles streaming: on first chunk stores `TaskRoute` and rewrites task IDs; on subsequent chunks rewrites only. |
+| Broker (`a2a.Broker`) | Implements `config.Observer`. On config change, calls `SetAgents()`. `ServeAPICatalog()` serves `GET /.well-known/api-catalog` as an RFC 9264 Linkset (`Content-Type: application/linkset+json`, registered by RFC 9727) listing all enabled agent endpoints. `ServeAgentCard(prefix)` serves `GET /a2a/{prefix}/.well-known/agent-card.json` from a cached, ticker-refreshed copy of the upstream card (mirroring `MCPManager`; not a per-request proxy), rewriting the card's `url` field to the gateway path (`/a2a/{prefix}`) so unmodified A2A clients route back through the gateway. `GetAgentByPrefix(prefix)` resolves a path prefix to the upstream agent. |
+| Router (`ExtProcServer`) | At the `RequestHeaders` phase: detects A2A traffic by `:path` prefix; extracts the agent prefix from `:path`, calls `A2ABroker.GetAgentByPrefix()`, sets `:authority` to the resolved agent hostname and the `x-a2a-agent` header. The JSON-RPC method is not known until the body, so **all method-specific work happens at `RequestBody`**, not here. At the `RequestBody` phase: authenticates via the OAuth principal (`sub`, read with `ExtractSubClaim`); for `message/send`/`message/stream` generates the gateway task ID and sets `x-a2a-task-id`; for `tasks/get`/`tasks/cancel`/`tasks/resubscribe` calls `ResolveTaskRoute()`, verifies the principal owns the task, and rewrites the gateway task ID in the request body to the upstream task ID. At the `ResponseHeaders` phase: sets `ModeOverride ResponseBodyMode=BUFFERED` (non-streaming) or `STREAMED` (`message/stream`/`tasks/resubscribe`) when `status == 200`. At the `ResponseBody` phase: for non-streaming methods, parses the upstream task ID from `result.id`, calls `StoreTaskRoute()`, rewrites upstream→gateway task ID (a buffered full-body JSON rewrite, distinct from the line-based SSE path), and evicts the route on a body-level `-32001`. `a2aSSEPassthrough.Process()` handles streaming: on the first `kind:task` event it stores the `TaskRoute`, and on every event it rewrites task IDs across `result.id`, `result.taskId`, and `history[].taskId`. |
 | Config (`MCPServersConfig`) | Stores `A2AAgents []*A2AAgent` alongside `Servers`. `SetA2AAgents()`, `ListA2AAgents()` provide thread-safe access under the existing `sync.RWMutex`. `Notify()` delivers A2A agent list to observers. |
 | Config Secret (`SecretReaderWriter`) | `UpsertA2AAgent()` and `RemoveA2AAgent()` follow the existing read-modify-write pattern with `retry.RetryOnConflict()`. `BrokerConfig` YAML gains an `a2aAgents` key. |
 | Gateway HTTPRoute (`broker_router.go`) | `buildGatewayHTTPRoute()` gains two new rules: `/a2a` prefix match (with `stripRouterHeaders` filter removing `x-a2a-agent` and `x-a2a-task-id`, covering all `/a2a/{prefix}` paths including per-agent card endpoints) and `/.well-known/api-catalog`. `httpRouteNeedsUpdate()` via `DeepEqual` ensures automatic updates on existing deployments. |
-| Task Store (`session.Cache`) | New `taskRoutes sync.Map` field. `StoreTaskRoute()`, `ResolveTaskRoute()`, `DeleteTaskRoute()` follow the same in-memory/Redis duality as the session cache. Redis key prefix: `a2atask:`. TTL: from `JWTManager.GetExpiresIn()` matching the gateway session. |
+| Task Store (`session.Cache`) | New `taskRoutes sync.Map` field (immutable `TaskRoute` values, no COW). `StoreTaskRoute()`, `ResolveTaskRoute()`, `DeleteTaskRoute()` follow the in-memory/Redis duality. Redis key prefix: `a2atask:`. TTL is a **fixed safety-net decoupled from the JWT/session** (the `idmap` pattern, `idmap/redis.go`) — A2A tasks can outlive a 24h session (§6.3), so a session-derived TTL would evict live tasks. Primary cleanup is `DeleteTaskRoute()` on a terminal `TaskState`/`-32001`; the TTL only backstops crashes. In-memory routes are torn down with the owning principal's session (or documented dev-only). |
 
 ### API Changes
 
@@ -276,12 +293,12 @@ metadata:
   name: weather-agent
   namespace: mcp-test
 spec:
-  skillPrefix: weather       # immutable once set (CEL rule); path-routes requests to /a2a/weather
+  agentPrefix: weather       # immutable once set (CEL rule); path-routes requests to /a2a/weather
   targetRef:                 # HTTPRoute pointing to the upstream A2A agent
     group: gateway.networking.k8s.io
     kind: HTTPRoute
     name: weather-agent-route
-  agentCardURL: ""           # optional override for /.well-known/agent.json path
+  agentCardURL: ""           # optional override for /.well-known/agent-card.json path
   credentialRef:             # optional auth for fetching the agent card
     name: weather-agent-secret
     key: token
@@ -294,10 +311,14 @@ status:
 ```
 
 **Validation markers:**
-- `skillPrefix` immutability: `+kubebuilder:validation:XValidation:rule="self == oldSelf"`
-- `skillPrefix` pattern: `+kubebuilder:validation:Pattern=^[a-z0-9][a-z0-9_]*$`
+- `agentPrefix` immutability: `+kubebuilder:validation:XValidation:rule="self == oldSelf"`
+- `agentPrefix` pattern: `+kubebuilder:validation:Pattern=^[a-z0-9][a-z0-9_]*$`
 - `agentCardURL` format: `+kubebuilder:validation:Pattern=^https?://`
 - `targetRef` uses `omitzero` not `omitempty` (kubeapilinter requirement)
+- `targetRef` resolves in the registration's own namespace; no cross-namespace `namespace` field
+  (cross-namespace agent routes would require a `ReferenceGrant`, out of scope). This deliberately
+  avoids inheriting the cross-namespace `targetRef` inconsistency filed against MCP core
+  (`getTargetHTTPRoute` ignores `targetRef.namespace` while two sibling paths honor it).
 
 #### New config types
 
@@ -307,7 +328,7 @@ type A2AAgent struct {
     Name         string      `json:"name"                   yaml:"name"`
     URL          string      `json:"url"                    yaml:"url"`
     Hostname     string      `json:"hostname,omitempty"     yaml:"hostname,omitempty"`
-    SkillPrefix  string      `json:"skillPrefix,omitempty"  yaml:"skillPrefix,omitempty"`
+    AgentPrefix  string      `json:"agentPrefix,omitempty"  yaml:"agentPrefix,omitempty"`
     Auth         *AuthConfig `json:"auth,omitempty"         yaml:"auth,omitempty"`
     Credential   string      `json:"credential,omitempty"   yaml:"credential,omitempty"`
     AgentCardURL string      `json:"agentCardURL,omitempty" yaml:"agentCardURL,omitempty"`
@@ -351,7 +372,7 @@ type TaskRoute struct {
     AgentHostname  string `json:"agentHostname"`
     AgentPath      string `json:"agentPath"`
     UpstreamTaskID string `json:"upstreamTaskID"`
-    SessionID      string `json:"sessionID"`
+    Principal      string `json:"principal"` // OAuth token `sub` that owns this task; checked on every tasks/* call
     CreatedAt      int64  `json:"createdAt"`
 }
 
@@ -364,10 +385,11 @@ In-memory: new `taskRoutes sync.Map` field on `Cache`, separate from `inmemory` 
 collision. No COW needed — values are immutable `TaskRoute` structs stored and replaced atomically
 via `sync.Map.Store`, unlike the `inmemory` map whose values are `map[string]string` requiring COW.
 
-Redis: key `a2atask:{gatewayTaskID}`, TTL from `JWTManager.GetExpiresIn(gatewaySessionID)`.
-Matches the session TTL alignment established in PR #1037.
-
-**[OPEN: Q4 — if A2A gets its own session, the TTL source changes. Needed before Week 8.]**
+Redis: key `a2atask:{gatewayTaskID}`, with a **fixed safety-net TTL decoupled from the session JWT**
+(the `idmap` pattern — `idmap/redis.go` uses a 1h default safety net plus an explicit `Remove`). A2A
+tasks can run for "seconds or days" (§6.3) and routinely outlive a 24h session, so a JWT-derived TTL
+would evict live tasks. Primary cleanup is `DeleteTaskRoute()` on a terminal `TaskState` or a
+body-level `-32001 TaskNotFoundError`; the TTL only backstops process crashes.
 
 #### BrokerConfig Secret
 
@@ -380,19 +402,27 @@ a2aAgents:
   - name: mcp-test/weather-agent-route
     url: http://weather-agent.mcp-test.svc.cluster.local:8080
     hostname: weather-agent.mcp.local
-    skillPrefix: weather
+    agentPrefix: weather
     state: Enabled
 ```
 
 ## Security Considerations
 
-**Session validation.** All A2A requests require a valid `mcp-session-id` JWT validated by
-`JWTManager.Validate()`. Requests without a valid session return 401 before reaching the upstream.
-This is identical to the `validateSession()` call in `HandleToolCall()`.
+**Authentication.** A2A authenticates per request via an OAuth 2.1 bearer token, validated by a
+Kuadrant AuthPolicy/Authorino on the `/a2a` route (the same model MCP uses; the MCP/A2A auth specs
+require a bearer on every request, audience-bound per RFC 8707). The router reads the authenticated
+principal (`sub`) at `RequestBody` via `ExtractSubClaim` (`internal/jwt/decode.go`), exactly as the
+existing URL-elicitation path does. **AuthPolicy MUST be enforced on `/a2a`**: `ExtractSubClaim`
+decode-trusts an already-validated bearer, so without edge validation the `sub` would be forgeable.
+For deployments issuing opaque (non-JWT) access tokens, the principal must instead come from an
+Authorino-signed trusted header (the `x-mcp-authorized`/ES256 machinery, verified today in the
+broker) — the documented hardening path.
 
-**Task ID isolation.** The gateway generates its own task IDs. Clients never see upstream task IDs.
-This prevents a client from probing or manipulating tasks belonging to other sessions by guessing
-upstream IDs.
+**Task ID isolation.** The gateway generates its own task IDs (UUIDv4); clients never see upstream
+task IDs. Task ownership is bound to the OAuth principal — `tasks/get`/`tasks/cancel`/`tasks/resubscribe`
+verify the requesting principal owns the resolved `TaskRoute` (SEP-2567 §Security: validate
+`(handle, auth_context)` on every call), so a client cannot probe or cancel another principal's task
+by guessing a gateway task ID.
 
 **Internal header stripping.** `x-a2a-agent` and `x-a2a-task-id` are stripped at both the
 HTTPRoute level (via `RequestHeaderModifier` filter in `buildGatewayHTTPRoute()`) and in
@@ -403,11 +433,20 @@ by the controller to fetch Agent Cards for registration validation. It is never 
 client `message/send` requests. The same authentication separation applies as with
 `MCPServerRegistration.credentialRef`.
 
-**Path prefix collision.** Two `A2AAgentRegistrations` with the same `skillPrefix` value would
-cause ambiguous path routing at `/a2a/{prefix}`. The `A2AReconciler` detects prefix conflicts at
-reconcile time by listing all `A2AAgentRegistrations` in the namespace and comparing `skillPrefix`
-values. A conflict sets a `PrefixConflict` condition on the newer registration and skips writing
-it to the config Secret until the conflict is resolved. No admission webhook is required.
+**Cross-namespace path prefix collision.** `A2AAgentRegistrations` from multiple namespaces are
+aggregated into one gateway's config (mirroring `MCPServerRegistration`, which writes to every valid
+gateway-extension namespace whose listener the route attaches to), so two agents in *different*
+namespaces can both claim prefix `weather` and collide at the broker's `prefix→agent` map. A
+per-namespace listing **cannot** detect this, and on a multi-tenant gateway (`allowedRoutes` admits
+both namespaces) it is a cross-tenant traffic hijack, not just an operational clash. Resolution:
+namespace-qualify the routing path as `/a2a/{namespace}/{prefix}`, which makes cross-namespace
+collision structurally impossible (reducing uniqueness to a namespace-scoped check the reconciler can
+do correctly and providing tenant isolation by construction); or, if a flat path is required,
+gateway-listener-wide conflict detection that picks the oldest `creationTimestamp` (mirroring Gateway
+API's own tiebreak) and sets a `PrefixConflict` condition on the newer registration. No admission
+webhook is required. **[OPEN: flat `/a2a/{prefix}` vs namespace-qualified `/a2a/{namespace}/{prefix}`
+— recommend the latter; pending mentor confirm. Related: the cross-namespace `targetRef` issue filed
+against MCP core, which this design must not inherit.]**
 
 ## Relationship to Existing Approaches
 
@@ -418,7 +457,7 @@ The ext_proc router branches on `:path` prefix before any MCP-specific logic run
 on `/mcp` never enters the A2A branch. A request on `/a2a/{prefix}` never enters `MCPRequest.Validate()`
 or `RouteMCPRequest()`.
 
-The broker serves `/.well-known/api-catalog` and `/a2a/{prefix}/.well-known/agent.json` (A2A)
+The broker serves `/.well-known/api-catalog` and `/a2a/{prefix}/.well-known/agent-card.json` (A2A)
 alongside `/mcp` (MCP) on the same HTTP server, following the same pattern as
 `/.well-known/oauth-protected-resource`.
 

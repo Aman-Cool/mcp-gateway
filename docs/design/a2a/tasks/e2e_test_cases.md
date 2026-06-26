@@ -8,9 +8,10 @@
 ### [Happy,A2A] API Catalog lists registered agents and per-agent card returns correct skills
 
 When an `A2AAgentRegistration` is created with a valid HTTPRoute pointing to an A2A test server,
-the gateway's `GET /.well-known/api-catalog` endpoint should return an RFC 9264 catalog containing
-a link to the agent's endpoint at `/a2a/{prefix}`. A subsequent `GET /a2a/{prefix}/.well-known/agent.json`
-should return the upstream agent's Agent Card proxied through the gateway, with the card's `url` field
+the gateway's `GET /.well-known/api-catalog` endpoint should return an RFC 9727 catalog (RFC 9264
+Linkset) containing a link to the agent's endpoint at `/a2a/{prefix}`. A subsequent
+`GET /a2a/{prefix}/.well-known/agent-card.json` should return the upstream agent's Agent Card served
+(cached) by the gateway, with the card's `url` field
 rewritten to the gateway path (`/a2a/{prefix}`) rather than the upstream address, so an unmodified A2A
 client following the card routes back through the gateway. The catalog entry should not appear until
 the registration is Ready.
@@ -19,7 +20,7 @@ the registration is Ready.
 
 ### [Happy,A2A] message/send routes to the correct upstream agent and returns a gateway task ID
 
-When a client with a valid `mcp-session-id` sends a `message/send` request to a registered agent's
+When a client authenticated with an OAuth bearer sends a `message/send` request to a registered agent's
 path (`/a2a/{prefix}`), the gateway should route the request to the correct upstream A2A agent,
 return a response containing a gateway-generated task ID (not the upstream's task ID), and store
 the task route mapping. The upstream agent should receive the request with the upstream task ID.
@@ -45,10 +46,11 @@ receive a response reflecting the canceled task state.
 
 ### [Happy,A2A] SSE streaming delivers task updates with consistent gateway task IDs
 
-When a client sends a `message/send` request with `Accept: text/event-stream`, the gateway should
+When a client sends a `message/stream` request (the v0.3.0 streaming method, §7.2), the gateway should
 deliver SSE chunks in real time. All `data:` events should contain the gateway task ID (not the
-upstream task ID) in the `id` field. The stream should complete when the upstream agent sends a
-terminal state (`completed`, `failed`, or `canceled`).
+upstream task ID) across `result.id`, `result.taskId`, and `history[].taskId`. The stream should
+complete when the upstream agent sends a terminal state (`completed`, `failed`, `canceled`, or
+`rejected`) with `final: true`.
 
 ---
 
@@ -63,24 +65,24 @@ reconcile completes.
 
 ### [A2A] Multiple agents registered with distinct prefixes route independently
 
-When two `A2AAgentRegistrations` are created with different `skillPrefix` values, the API Catalog
+When two `A2AAgentRegistrations` are created with different `agentPrefix` values, the API Catalog
 should list both agents at their respective paths (`/a2a/agent-a` and `/a2a/agent-b`). A
 `message/send` request to `/a2a/agent-a` should route to agent A; a request to `/a2a/agent-b`
 should route to agent B. There should be no cross-routing.
 
 ---
 
-### [A2ASecurity] message/send without a valid session returns 401
+### [A2ASecurity] message/send without a valid bearer returns 401
 
-When a client sends a `message/send` request to `/a2a/{prefix}` without a `mcp-session-id` header,
-or with an expired or invalid JWT, the gateway should return 401 without forwarding anything to the
-upstream agent. The upstream agent should receive no request.
+When a client sends a `message/send` request to `/a2a/{prefix}` without an `Authorization: Bearer`
+token, or with an expired or invalid one, the gateway's AuthPolicy should return 401 without
+forwarding anything to the upstream agent. The upstream agent should receive no request.
 
 ---
 
 ### [A2ASecurity] message/send to unregistered path prefix returns JSON-RPC -32602
 
-When a client with a valid session sends a `message/send` request to `/a2a/{prefix}` where the
+When an authenticated client sends a `message/send` request to `/a2a/{prefix}` where the
 prefix does not match any registered `A2AAgentRegistration`, the gateway should return a JSON-RPC
 error response with code `-32602` and not forward the request to any upstream agent.
 
