@@ -617,6 +617,34 @@ A2A routing emits OpenTelemetry spans on the same tracer as MCP — a router spa
 task-store operations — while Authorino and Limitador export their own auth/rate-limit decision metrics.
 A2A-specific Prometheus metrics are in [Future Considerations](#future-considerations).
 
+### Distributed tracing for async tasks
+
+A2A is asynchronous: `message/send` (one HTTP request → one trace), then `tasks/get`/`tasks/cancel`/
+`tasks/resubscribe` minutes or hours later (separate requests → separate traces). W3C trace context
+(`traceparent`, extracted today by `extractTraceContext`, `internal/mcp-router/tracing.go:46`) links the
+hops **within** a single request — client → gateway → agent — but cannot link request 1 to request 2:
+different requests carry different trace IDs, so a stalled task's lifecycle is fragmented across N traces.
+Two complementary layers fix this:
+
+- **Inter-request correlation (the floor).** Every A2A span carries `a2a.task.id = {gatewayTaskID}` as an
+  attribute (alongside `a2a.method`, `a2a.agent`, and the operator-only `a2a.upstream.task.id`), set via
+  an `a2aSpanAttributes()` analog of the existing `spanAttributes()` (`tracing.go:51`). The gateway task
+  ID is stable across every request for the task, so a single backend query —
+  `{ span.a2a.task.id = "gateway-123" }` in Tempo, the equivalent tag search in Jaeger — gathers **all**
+  traces touching the task (send, polls, cancel) into one view. `a2a.upstream.task.id` additionally
+  stitches the gateway's spans to the agent's own traces, if the agent emits OTel.
+- **Span links (the enhancement).** The `message/send` span's trace context (`traceID`/`spanID`) is stored
+  in the `TaskRoute` (extending the gateway↔backend correlation `idmap.Entry` already keeps via
+  `ServerName`/`SessionID`). Each later operation adds an OpenTelemetry **Span Link** back to the creating
+  span, which Jaeger/Tempo render as clickable cross-trace navigation — richer than tag search, but
+  dependent on storing the context and on backend link rendering. The attribute is the must-have (works in
+  any backend with tag search); links are additive.
+
+**Cardinality.** `a2a.task.id` is high-cardinality (one value per task). That is correct on a **span**
+(trace backends index attributes for search) but must **not** become a Prometheus metric label — the A2A
+metrics ([Future Considerations](#future-considerations)) use bounded labels (`method`, `agent`,
+`hit`/`miss`) and reference a task only via trace exemplars, never as a metric dimension.
+
 ## Upstream Authentication
 
 A2A has two distinct gateway→agent paths with different credential models — the same split MCP uses, and

@@ -270,6 +270,7 @@ make lint
 - [ ] `RouteA2ARequest()`: authenticates via OAuth principal (`ExtractSubClaim`), switches on `message/send`/`message/stream`/`tasks/get`/`tasks/cancel`/`tasks/resubscribe`
 - [ ] `HandleA2ATaskSend()`: generates the gateway task ID at `RequestBody`, sets `x-a2a-task-id`; `isStreamingMethod()` (`message/stream`/`tasks/resubscribe`) sets `ModeOverride`
 - [ ] Errors are `application/json` JSON-RPC (NOT SSE-framed): unknown method → `-32601`; unknown gateway task ID → `-32001 TaskNotFoundError` (§8.2); missing/invalid bearer rejected by AuthPolicy at the edge, empty principal → fail closed
+- [ ] A2A spans carry `a2a.task.id` (gatewayTaskID), `a2a.method`, `a2a.agent` attributes (`a2aSpanAttributes`, analog of `spanAttributes`) so operators correlate an async task's lifecycle across separate requests; task ID is a span attribute only, never a metric label
 - [ ] MCP path (`/mcp` traffic) completely unaffected — regression tests pass
 - [ ] Unit tests cover all branches above
 
