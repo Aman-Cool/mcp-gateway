@@ -617,6 +617,61 @@ A2A routing emits OpenTelemetry spans on the same tracer as MCP — a router spa
 task-store operations — while Authorino and Limitador export their own auth/rate-limit decision metrics.
 A2A-specific Prometheus metrics are in [Future Considerations](#future-considerations).
 
+## Upstream Authentication
+
+A2A has two distinct gateway→agent paths with different credential models — the same split MCP uses, and
+the reason MCP keeps `credentialRef` off the client path.
+
+### Card discovery (broker → agent): Gateway-to-Agent via `credentialRef`
+
+The broker fetches each agent card on a ticker — there is **no client** in this flow. If the card
+endpoint requires auth, the broker presents the static credential from `A2AAgentRegistration.credentialRef`
+(the A2A analog of `MCPServerRegistration.credentialRef`, used by the broker for discovery only). The
+router never sees `credentialRef` — confirmed for MCP (`internal/mcp-router/` has no access to it), and
+the same isolation holds for A2A.
+
+### Task invocation (client → agent): client identity, not `credentialRef`
+
+`message/send` / `tasks/*` carry a real client, so — exactly as MCP `tools/call` — the upstream credential
+is the **client's identity**, never the gateway's static `credentialRef`. Injecting a static service
+credential here is the **confused-deputy** anti-pattern: the agent loses the caller's identity and a
+low-privilege client rides the gateway's credential. The agent's `securitySchemes`/`security` (§5) declare
+what it accepts. Two modes, mirroring MCP:
+
+- **Token pass-through (default).** The client's `Authorization: Bearer` is forwarded to the agent (MCP
+  forwards client headers verbatim unless exchange is configured — `request_handlers.go:706-714` passes
+  `authorization` through). Works when the agent trusts the same issuer and the token's audience covers
+  the agent.
+- **Token exchange (recommended).** A Kuadrant AuthPolicy has Authorino perform RFC 8693 exchange,
+  replacing the client token with one scoped and **re-audienced to the agent** before the call (the
+  pattern in `config/samples/oauth-token-exchange/tools-call-auth.yaml`). This preserves the caller's
+  identity while limiting blast radius, and satisfies RFC 8707 audience binding — a token minted for the
+  `/a2a` resource is otherwise wrong-audience for the agent. No gateway code; it is AuthPolicy config.
+
+The agent's **per-skill** `security` is advisory at the gateway: since `message/send` names no skill
+(§7.1.1), the gateway authenticates at the agent level and the agent applies any per-skill requirement
+itself — consistent with [Policy Enforcement](#policy-enforcement) (the agent, not the skill, is the
+gateway's boundary).
+
+### Exception: static-key / mTLS-only agents
+
+If an agent advertises only `apiKey` or `mutualTLS` (no OIDC the client could satisfy), there is no
+client token the agent would accept. The operator may then opt into **Gateway-to-Agent on the invocation
+path** — a per-agent static credential the gateway injects. This is acceptable **only** because the
+gateway is the enforcement point: per-client authorization MUST be enforced at the gateway by the
+per-agent AuthPolicy ([Policy Enforcement](#policy-enforcement)) before the call, and per-user audit then
+lives at the gateway, not the agent. It is an explicit opt-in, not the default, and takes the
+confused-deputy trade-off knowingly.
+
+### Summary
+
+| Path | Who authenticates | Mechanism |
+|---|---|---|
+| Card fetch (discovery) | gateway | `credentialRef` (static, broker-held) |
+| `message/send`/`tasks/*` — default | client | forward client bearer |
+| `message/send`/`tasks/*` — recommended | client | RFC 8693 token exchange (Authorino) → agent-audience token |
+| static-key / mTLS-only agent | gateway (opt-in) | per-agent static credential; client authz enforced at gateway AuthPolicy |
+
 ## Relationship to Existing Approaches
 
 A2A support is entirely additive. The `/mcp` path, all MCP request handling, all existing
