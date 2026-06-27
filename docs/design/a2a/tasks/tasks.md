@@ -66,10 +66,10 @@ make spell
 
 **Verification:**
 ```bash
-curl http://a2a-server.mcp-test.svc.cluster.local:8080/.well-known/agent-card.json
-curl -X POST http://a2a-server.mcp-test.svc.cluster.local:8080/a2a \
+curl http://a2a-test-server.mcp-test.svc.cluster.local:9090/.well-known/agent-card.json
+curl -X POST http://a2a-test-server.mcp-test.svc.cluster.local:9090/a2a \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"type":"text","text":"hello"}]}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hello"}]}}}'
 ```
 
 ---
