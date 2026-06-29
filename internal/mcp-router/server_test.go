@@ -804,7 +804,10 @@ func TestExtProcServer_OnConfigChange_DataRace(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for range iterations {
-			_, _ = server.HandleRequestHeaders(context.Background(), nil)
+			if _, err := server.HandleRequestHeaders(context.Background(), nil); err != nil {
+				t.Errorf("HandleRequestHeaders returned error during race exercise: %v", err)
+				return
+			}
 		}
 	}()
 
