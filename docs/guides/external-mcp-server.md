@@ -152,11 +152,11 @@ kubectl get mcpsr -n mcp-test
 Expected output:
 
 ```text
-NAME     PREFIX    TARGET                PATH   READY   TOOLS   CREDENTIALS    AGE
-github   github_   github-mcp-external   /mcp   True    41      github-token   30s
+NAME     PREFIX    TARGET                PATH   READY   CATEGORY   CREDENTIALS    AGE
+github   github_   github-mcp-external   /mcp   True               github-token   30s
 ```
 
-At this point the broker has discovered the GitHub tools and will list them to clients.
+Ready means the config has been written to the gateway config secret. The broker discovers tools asynchronously after that. To check tool availability, query the broker's `/status` endpoint.
 
 ### Step 7: Connect an MCP Client
 

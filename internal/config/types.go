@@ -121,14 +121,16 @@ func normalizeState(state string) string {
 }
 
 // ConfigChanged checks if a server's config has changed in a way that will affect the gateway.
-// This means having a different name, prefix, hostname, credential, state, category, hint, or tags.
+// This means having a different name, prefix, url, hostname, credential, state, category, hint, or tags.
 func (mcpServer *MCPServer) ConfigChanged(existingConfig MCPServer) bool {
 	if existingConfig.Name != mcpServer.Name ||
 		existingConfig.Prefix != mcpServer.Prefix ||
+		existingConfig.URL != mcpServer.URL ||
 		existingConfig.Hostname != mcpServer.Hostname ||
 		existingConfig.Credential != mcpServer.Credential ||
 		existingConfig.CACert != mcpServer.CACert ||
 		normalizeState(existingConfig.State) != normalizeState(mcpServer.State) ||
+		existingConfig.UserSpecificList != mcpServer.UserSpecificList ||
 		existingConfig.Hint != mcpServer.Hint ||
 		tokenURLElicitationChanged(mcpServer.TokenURLElicitation, existingConfig.TokenURLElicitation) {
 		return true

@@ -123,7 +123,7 @@ EOF
 
 ## Step 4: Verify Registration
 
-Wait for the MCPServerRegistration to become ready (the broker needs a moment to connect and discover tools and prompts):
+Wait for the MCPServerRegistration to become ready (Ready means the config has been written to the gateway config secret; the broker discovers tools asynchronously after that):
 
 ```bash
 kubectl wait --for=condition=Ready mcpsr/my-mcp-server -n mcp-test --timeout=120s
@@ -135,12 +135,14 @@ Then check the status:
 kubectl get mcpsr -A
 ```
 
-The `READY` column should show `True` and the `TOOLS` column should show the number of tools discovered. For example:
+The `READY` column should show `True`. For example:
 
 ```text
-NAMESPACE   NAME            PREFIX      TARGET               PATH   READY   TOOLS   CREDENTIALS   AGE
-mcp-test    my-mcp-server   myserver_   my-mcp-server-route   /mcp   True    5                     30s
+NAMESPACE   NAME            PREFIX      TARGET               PATH   READY   CATEGORY   CREDENTIALS   AGE
+mcp-test    my-mcp-server   myserver_   my-mcp-server-route   /mcp   True                             30s
 ```
+
+To check tool availability, query the broker's `/status` endpoint.
 
 If the status is not Ready, check the MCPServerRegistration conditions for details:
 

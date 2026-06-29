@@ -610,6 +610,11 @@ func immediateResponse(code typev3.StatusCode) *extProcV3.ProcessingResponse {
 			ImmediateResponse: &extProcV3.ImmediateResponse{
 				Body:   []byte("dummy"),
 				Status: &typev3.HttpStatus{Code: code},
+				Headers: &extProcV3.HeaderMutation{
+					SetHeaders: []*corev3.HeaderValueOption{
+						{Header: &corev3.HeaderValue{Key: "content-type", RawValue: []byte("text/plain")}},
+					},
+				},
 			},
 		},
 	}

@@ -139,6 +139,10 @@ func TestResponseBuilder_WithImmediateResponse(t *testing.T) {
 			require.Equal(t, tc.StatusCode, int32(ir.ImmediateResponse.Status.Code))
 			require.Equal(t, []byte(tc.Message), ir.ImmediateResponse.Body)
 			require.Equal(t, "ext-proc error: "+tc.Message, ir.ImmediateResponse.Details)
+			require.NotNil(t, ir.ImmediateResponse.Headers)
+			require.Len(t, ir.ImmediateResponse.Headers.SetHeaders, 1)
+			require.Equal(t, "content-type", ir.ImmediateResponse.Headers.SetHeaders[0].Header.Key)
+			require.Equal(t, []byte("text/plain"), ir.ImmediateResponse.Headers.SetHeaders[0].Header.RawValue)
 		})
 	}
 }
