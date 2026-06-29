@@ -534,7 +534,10 @@ A2A's primary justification is that inter-agent traffic flows through the same K
 MCP — authentication, authorization, rate limiting, observability — instead of agent-to-agent calls
 bypassing the gateway. All A2A traffic transits the `/a2a` HTTPRoute, so every Kuadrant policy that
 attaches to a Gateway listener or HTTPRoute applies unchanged. Enforcement needs **no gateway code** —
-it is Kubernetes resource configuration.
+it is Kubernetes resource configuration. This is also why routing is path-per-agent: Kuadrant policies
+attach to HTTPRoutes, so giving each agent its own `/a2a/{prefix}` path is what makes a per-agent
+`AuthPolicy`/`RateLimitPolicy` possible — a body-level discriminator (such as A2A v1.0's `tenant` field)
+has no policy attachment point and so cannot carry per-agent enforcement.
 
 ### Authentication and per-agent authorization (AuthPolicy)
 
