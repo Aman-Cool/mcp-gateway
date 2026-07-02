@@ -194,6 +194,23 @@ func (rb *ResponseBuilder) WithDoNothingResponseHeaderResponse() *ResponseBuilde
 	return rb
 }
 
+// WithResponseHeaderMutations will return a processing response that sets and removes response headers
+func (rb *ResponseBuilder) WithResponseHeaderMutations(set []*basepb.HeaderValueOption, remove ...string) *ResponseBuilder {
+	rb.response = append(rb.response, &eppb.ProcessingResponse{
+		Response: &eppb.ProcessingResponse_ResponseHeaders{
+			ResponseHeaders: &eppb.HeadersResponse{
+				Response: &eppb.CommonResponse{
+					HeaderMutation: &eppb.HeaderMutation{
+						SetHeaders:    set,
+						RemoveHeaders: remove,
+					},
+				},
+			},
+		},
+	})
+	return rb
+}
+
 // WithResponseHeaderResponse will return a processing response to set the headers passed into the response
 func (rb *ResponseBuilder) WithResponseHeaderResponse(headers []*basepb.HeaderValueOption) *ResponseBuilder {
 	rb.response = append(rb.response, &eppb.ProcessingResponse{

@@ -333,9 +333,19 @@ func (s *ExtProcServer) Process(stream extProcV3.ExternalProcessor_ProcessServer
 			// a2a spike: on 200 flip the response body mode per method
 			// (BUFFERED non-streaming, STREAMED sse) and keep the stream
 			// open for the body phase. this is the mid-request mode change
-			// being derisked.
+			// being derisked. spike finding: the buffered rewrite changes
+			// the body length, so content-length must be dropped here at
+			// the headers phase — envoy fails closed on a length mismatch
+			// ("mismatch between content length and the length of the
+			// mutated body") since the header is committed before the body
+			// mutation arrives.
 			if a2a != nil {
-				responses := responseBuilder.WithDoNothingResponseHeaderResponse().Build()
+				var responses []*extProcV3.ProcessingResponse
+				if statusCode == "200" && !a2a.streaming {
+					responses = responseBuilder.WithResponseHeaderMutations(nil, "content-length").Build()
+				} else {
+					responses = responseBuilder.WithDoNothingResponseHeaderResponse().Build()
+				}
 				if statusCode == "200" {
 					responses[0].ModeOverride = a2aModeOverride(a2a.streaming)
 				}
