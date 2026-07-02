@@ -733,9 +733,13 @@ for any client, but it makes the gateway a **card-signing trust authority** (key
 decision), out of scope unless explicitly needed.
 
 And if a [pluggable card store](#agent-card-cache-pluggable-backend) (e.g. a registry) is the card source
-rather than the upstream agent: does the store preserve the agent's original signature or re-sign on
-publish — i.e. does the registry become the trust authority? That changes who the client verifies, and is
-the piece to settle before leaning on a registry as a source.
+rather than the upstream agent, the store must stay out of the trust chain: it **preserves the agent's
+signatures byte-for-byte and never re-signs**, so the client always verifies against the agent's key —
+the store provides versioned storage, discovery, and governance, not identity. Any backend that verifies
+or re-signs on publish would silently become the trust authority the client is actually verifying, which
+is a different (and larger) trust decision than storage. This signature-preserving behavior is a
+**requirement on any card-store backend**, and at least one existing registry implementation already
+works exactly this way (stores cards as opaque content, validates only the JWS structure on ingest).
 
 ## Relationship to Existing Approaches
 
