@@ -13,9 +13,9 @@
 </div>
 
 > [!IMPORTANT]
-> This is a **workshop fork** of [Kuadrant/mcp-gateway](https://github.com/Kuadrant/mcp-gateway) (the original project README lives [there](https://github.com/Kuadrant/mcp-gateway#readme)). The agreed home for this work is upstream — the design lands via [#1114](https://github.com/Kuadrant/mcp-gateway/pull/1114), and code upstreams incrementally once proven here. The fork exists so A2A exploration can move fast without carrying MCP regression risk into the main repo ; workshop in the fork, home in-tree.
+> This is a **workshop fork** of [Kuadrant/mcp-gateway](https://github.com/Kuadrant/mcp-gateway) (the original project README lives [there](https://github.com/Kuadrant/mcp-gateway#readme)). The agreed home for this work is upstream.., the design lands via [#1114](https://github.com/Kuadrant/mcp-gateway/pull/1114), and code upstreams incrementally once proven here. The fork exists so A2A exploration can move fast without carrying MCP regression risk into the main repo ; workshop in the fork, home in-tree.
 
-This fork is where I'm prototyping Agent2Agent (A2A) protocol support for Kuadrant's MCP Gateway, as part of the CNCF LFX mentorship *"Prototype A2A protocol support in the agentic gateway"* (2026 Term 2), mentored by the Kuadrant maintainers. Everything here traces back to an upstream artifact — the design doc, the test server, the review threads — and this README is the map.
+This fork is where I'm prototyping Agent2Agent (A2A) protocol support for Kuadrant's MCP Gateway, as part of the CNCF LFX mentorship *"Prototype A2A protocol support in the agentic gateway"* (2026 Term 2), mentored by the Kuadrant maintainers. Everything here traces back to an upstream artifact : the design doc, the test server, the review threads and this README is the map.
 
 ## The problem, in one paragraph
 
@@ -69,11 +69,11 @@ The architecture is version-agnostic — routing, task-ID mapping, CRD, policy a
 
 ## Why a gateway should carry this traffic
 
-The durable value isn't protocol plumbing — it's that inter-agent traffic picks up the same **Kuadrant policy plane** MCP traffic already has, with zero gateway code per policy: AuthPolicy (OIDC/JWT via Authorino) for who may talk to which agent, RateLimitPolicy (Limitador) for how often, OpenTelemetry traces stitching a task's whole lifecycle across requests, and centralized discovery so clients never need upstream addresses. Kuadrant policies attach to Gateway API HTTPRoutes ; that one fact drives most of the design below.
+The durable value isn't protocol plumbing.., it's that inter-agent traffic picks up the same **Kuadrant policy plane** MCP traffic already has, with zero gateway code per policy: AuthPolicy (OIDC/JWT via Authorino) for who may talk to which agent, RateLimitPolicy (Limitador) for how often, OpenTelemetry traces stitching a task's whole lifecycle across requests, and centralized discovery so clients never need upstream addresses. Kuadrant policies attach to Gateway API HTTPRoutes ; that one fact drives most of the design below.
 
 ## How it works
 
-Two flows carry the whole story. Discovery — the broker serves each registered agent's card with its `url` rewritten to the gateway path, which is the load-bearing trick that makes *unmodified* A2A clients route through the gateway:
+Two flows carry the whole story. Discovery, the broker serves each registered agent's card with its `url` rewritten to the gateway path, which is the load-bearing trick that makes *unmodified* A2A clients route through the gateway:
 
 ```mermaid
 sequenceDiagram
@@ -173,60 +173,60 @@ If the schedule slips, the must-have order is CRD/controller → card serving �
 ## Design decisions, and why
 
 <details>
-<summary><b>1 — Path-per-agent routing, not skill dispatch</b></summary>
+<summary><b>1 : Path-per-agent routing, not skill dispatch</b></summary>
 
 <br>
 
-The protocol never routes by skill — no `skill` field exists in `message/send` (§7.1.1, both spec versions). The two honest options were a path per agent or a custom header ; a header only works for clients we've specifically taught about the gateway, while a path works for *any* stock A2A client, because clients already POST to whatever URL the agent card advertises. The card the gateway serves points at `/a2a/{prefix}` — so the routing key lives in the card, not in anything the client has to be told. It's also what agentgateway (Linux Foundation) does, and it gives each agent its own HTTPRoute for per-agent policy attachment.
+The protocol never routes by skill... no `skill` field exists in `message/send` (§7.1.1, both spec versions). The two honest options were a path per agent or a custom header ; a header only works for clients we've specifically taught about the gateway, while a path works for *any* stock A2A client, because clients already POST to whatever URL the agent card advertises. The card the gateway serves points at `/a2a/{prefix}`; so the routing key lives in the card, not in anything the client has to be told. It's also what agentgateway (Linux Foundation) does, and it gives each agent its own HTTPRoute for per-agent policy attachment.
 
 </details>
 
 <details>
-<summary><b>2 — Card url rewriting is load-bearing (and the v1.0 signed-card tension)</b></summary>
+<summary><b>2 : Card url rewriting is load-bearing (and the v1.0 signed-card tension)</b></summary>
 
 <br>
 
-If the broker proxied upstream cards through unchanged, a client would read the upstream `url` and talk *directly* to the agent — silently bypassing the gateway: no AuthPolicy, no rate limits, no logs, and nothing errors. So the served card's `url` is rewritten to the gateway path ; that single rewrite is what makes unmodified clients route through the policy perimeter.
+If the broker proxied upstream cards through unchanged, a client would read the upstream `url` and talk *directly* to the agent... silently bypassing the gateway: no AuthPolicy, no rate limits, no logs, and nothing errors. So the served card's `url` is rewritten to the gateway path ; that single rewrite is what makes unmodified clients route through the policy perimeter.
 
-v1.0 complicates it: cards can carry JWS signatures over the canonicalized card, and the signature covers the URL — a rewritten card is an invalidated signature. The direction under discussion upstream: route by path prefix (and v1.0's `tenant` field, which exists precisely for multiple agents behind one endpoint) and serve signed cards **verbatim**, with the catalog advertising the gateway endpoint. The open dependency — whether clients reliably discover via catalog/tenant rather than the card's own interface URL — is flagged in the design rather than hand-waved.
+v1.0 complicates it: cards can carry JWS signatures over the canonicalized card, and the signature covers the URL — a rewritten card is an invalidated signature. The direction under discussion upstream: route by path prefix (and v1.0's `tenant` field, which exists precisely for multiple agents behind one endpoint) and serve signed cards **verbatim**, with the catalog advertising the gateway endpoint. The open dependency.., whether clients reliably discover via catalog/tenant rather than the card's own interface URL; is flagged in the design rather than hand-waved.
 
 </details>
 
 <details>
-<summary><b>3 — Gateway-owned task IDs</b></summary>
+<summary><b>3 : Gateway-owned task IDs</b></summary>
 
 <br>
 
-Clients never see upstream task IDs. The router generates a gateway ID at the request, stores the `(gateway ID → agent, upstream ID)` route when the upstream's response reveals its ID, and rewrites every subsequent surface — response bodies, SSE events (`result.id`, `result.taskId`, `history[].taskId`), poll requests. Task ownership binds to the authenticated principal, so one client can't probe or cancel another's task by guessing IDs. Routes die on terminal task states ; a fixed Redis TTL backstops crashes, deliberately decoupled from session lifetime because A2A tasks can outlive any session.
+Clients never see upstream task IDs. The router generates a gateway ID at the request, stores the `(gateway ID → agent, upstream ID)` route when the upstream's response reveals its ID, and rewrites every subsequent surface... response bodies, SSE events (`result.id`, `result.taskId`, `history[].taskId`), poll requests. Task ownership binds to the authenticated principal, so one client can't probe or cancel another's task by guessing IDs. Routes die on terminal task states ; a fixed Redis TTL backstops crashes, deliberately decoupled from session lifetime because A2A tasks can outlive any session.
 
 </details>
 
 <details>
-<summary><b>4 — Per-method response body mode (the current spike)</b></summary>
+<summary><b>4 : Per-method response body mode (the current spike)</b></summary>
 
 <br>
 
-Non-streaming methods (`message/send`, `tasks/get`) need the *whole* response body in one pass to rewrite the task ID — Envoy's `BUFFERED` mode. Streaming methods (`message/stream`, `tasks/resubscribe`) need chunks as they arrive — `STREAMED`. The method is only known at the request-body phase, so the router must flip the mode **mid-request** at response-headers via ext_proc `ModeOverride`. The gateway already half-proves this (the elicitation path flips to STREAMED) ; choosing the mode per method, and the BUFFERED half, is the new bit — hence spike 1, with the finding feeding back into the design PR.
+Non-streaming methods (`message/send`, `tasks/get`) need the *whole* response body in one pass to rewrite the task ID — Envoy's `BUFFERED` mode. Streaming methods (`message/stream`, `tasks/resubscribe`) need chunks as they arrive — `STREAMED`. The method is only known at the request-body phase, so the router must flip the mode **mid-request** at response-headers via ext_proc `ModeOverride`. The gateway already half-proves this (the elicitation path flips to STREAMED) ; choosing the mode per method, and the BUFFERED half, is the new bit... hence spike 1, with the finding feeding back into the design PR.
 
 </details>
 
 <details>
-<summary><b>5 — Two auth paths that must never mix</b></summary>
+<summary><b>5 : Two auth paths that must never mix</b></summary>
 
 <br>
 
-Card fetching (broker → agent, no client involved) uses the registration's `credentialRef` — a static credential the router can never see. Task invocation (a real client behind every call) forwards the *client's* identity — bearer pass-through or, recommended, RFC 8693 token exchange re-audienced to the agent via Authorino. Injecting the gateway's static credential into client calls would be the classic confused-deputy: the agent loses the caller's identity and a low-privilege client rides the gateway's credential. Same split MCP already enforces, for the same reason.
+Card fetching (broker → agent, no client involved) uses the registration's `credentialRef`; a static credential the router can never see. Task invocation (a real client behind every call) forwards the *client's* identity — bearer pass-through or, recommended, RFC 8693 token exchange re-audienced to the agent via Authorino. Injecting the gateway's static credential into client calls would be the classic confused-deputy: the agent loses the caller's identity and a low-privilege client rides the gateway's credential. Same split MCP already enforces, for the same reason.
 
 </details>
 
 ## Reading list
 
-The primary sources this work leans on — fetched and verified, not summarized from memory: the [A2A specification](https://a2a-protocol.org/latest/specification/) and [what's new in v1.0](https://a2a-protocol.org/latest/whats-new-v1/) ; [RFC 9727](https://www.rfc-editor.org/rfc/rfc9727) (api-catalog well-known URI) and [RFC 9264](https://www.rfc-editor.org/rfc/rfc9264) (Linkset) for discovery ; [agentgateway](https://agentgateway.dev) as prior art for route-per-agent + card rewriting ; the upstream [design doc](https://github.com/Kuadrant/mcp-gateway/pull/1114) where the decisions above are argued in full ; and Kuadrant's own [MCP Gateway docs](https://docs.kuadrant.io) for the platform this extends.
+The primary sources this work leans on : the [A2A specification](https://a2a-protocol.org/latest/specification/) and [what's new in v1.0](https://a2a-protocol.org/latest/whats-new-v1/) ; [RFC 9727](https://www.rfc-editor.org/rfc/rfc9727) (api-catalog well-known URI) and [RFC 9264](https://www.rfc-editor.org/rfc/rfc9264) (Linkset) for discovery ; [agentgateway](https://agentgateway.dev) as prior art for route-per-agent + card rewriting ; the upstream [design doc](https://github.com/Kuadrant/mcp-gateway/pull/1114) where the decisions above are argued in full ; and Kuadrant's own [MCP Gateway docs](https://docs.kuadrant.io) for the platform this extends.
 
 ---
 
 <div align="center">
 
-Everything here is headed upstream to [Kuadrant/mcp-gateway](https://github.com/Kuadrant/mcp-gateway) — if any of it interests you, the design discussion on [#1114](https://github.com/Kuadrant/mcp-gateway/pull/1114) is the room where it's happening, and pushback is genuinely welcome 🙂
+Everything here is headed upstream to [Kuadrant/mcp-gateway](https://github.com/Kuadrant/mcp-gateway) if any of it interests you, the design discussion on [#1114](https://github.com/Kuadrant/mcp-gateway/pull/1114) is the room where it's happening, and pushback is genuinely welcome 🙂
 
 </div>
