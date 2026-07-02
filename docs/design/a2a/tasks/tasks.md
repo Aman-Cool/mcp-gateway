@@ -137,12 +137,11 @@ kubectl logs -n mcp-system deployment/mcp-gateway-controller
 
 **Acceptance criteria:**
 - [ ] Finalizer added on create, removed only after config is cleaned up
-- [ ] `getTargetHTTPRoute()` resolves HTTPRoute using `WrapHTTPRoute()` + `Validate()`
+- [ ] `getTargetHTTPRoute()` resolves HTTPRoute using `WrapHTTPRoute()` + `Validate()`, honoring `targetRef.namespace` (defaulting to the registration's namespace) — and the HTTPRoute field index resolves the namespace identically, so cross-namespace watches fire
 - [ ] `buildA2AAgentConfig()` handles `IsHostnameBackend()` and `IsServiceBackend()` using existing helpers
 - [ ] `UpsertA2AAgent()` called for each valid MCPGatewayExtension namespace
-- [ ] Status conditions: `Ready=True` when agent card is discoverable, `AgentCardDiscovered=True` after successful HTTP GET to agent card URL
-- [ ] `DiscoveredSkills int32` in status reflects skill count from last fetched Agent Card
-- [ ] Controller integration tests: new registration → Ready=True; missing HTTPRoute → Ready=False; deletion removes config
+- [ ] Status conditions: `Ready=True` (reason `Ready`) when config is written, mirroring `MCPServerRegistration` — `Ready` is not a promise the agent is reachable or serving, and no discovered card content (skills, card fields) appears in status
+- [ ] Controller integration tests: new registration → Ready=True; missing HTTPRoute → Ready=False; deletion removes config; cross-namespace `targetRef` resolves and reconciles
 
 **Verification:**
 ```bash
@@ -189,7 +188,7 @@ make test-unit
 - [ ] `ServeAPICatalog()` has OTel span `"a2a.ServeAPICatalog"` with `agent.count` attribute, following `HandleToolCall()` pattern
 - [ ] `A2AAgentManager` caches the upstream card with a ticker refresh (mirroring `MCPManager`), serving stale-on-error; `ServeAgentCard()` serves the cached card with its `url` rewritten to the gateway path (`/a2a/{prefix}`) — not a per-request upstream proxy
 - [ ] Card refresh is poll-only (A2A has no card-change push): ticker re-fetch with conditional GET (`If-None-Match`/`If-Modified-Since`) + `version`/SHA-256 change detection; act only on change (in-memory cache swap under RWMutex, no Secret write); staleness bound = ticker interval (reuse `managerTickerInterval`, default 1 min)
-- [ ] If the controller re-fetches to refresh `discoveredSkills`, it skips the status `Update` when `version`/hash is unchanged (reuse the `ConfigChanged()` no-op discipline)
+- [ ] No discovered card content is surfaced in registration status (`Ready` = config written); the broker's ticker refresh is the only live card sync
 - [ ] `credentialRef` is used by the broker ONLY for the card fetch (discovery), never injected into client `message/send`/`tasks/*` (router has no `credentialRef` access; invocation auth = forwarded client bearer or RFC 8693 token exchange via AuthPolicy)
 - [ ] Unit tests: `OnConfigChange` triggers `SetAgents`; `ServeAgentCard` with unreachable upstream skips gracefully; `ServeAgentCard` rewrites the card `url` to the gateway path; `GetAgentByPrefix` lookup
 - [ ] `go test -race ./internal/a2a/...` passes
@@ -337,6 +336,7 @@ make test-unit
 - [ ] Envelope-only parsing: unmarshal the JSON-RPC envelope + result identity fields only; keep `status`/`artifact`/`history`/`parts` as `json.RawMessage` — never decode `FilePart.file.bytes`/`DataPart.data`; `history[].taskId` rewrite is a scoped replace within the history raw bytes; cost is O(envelope), not O(artifact)
 - [ ] `HandleResponseHeaders()` sets `ModeOverride ResponseBodyMode=STREAMED` when `isA2A && isStreamingA2AMethod()` (`message/stream`/`tasks/resubscribe`)
 - [ ] Non-streaming `message/send`/`tasks/get` use a separate BUFFERED full-body rewrite path; an A2A flag gates `Process()` continuing into `ResponseBody` (today it only continues when `rewriter != nil`)
+- [ ] The BUFFERED override removes the `content-length` response header in the same ResponseHeaders response — the rewrite changes the body length and Envoy fails closed on the mismatch (verified against Envoy/Istio 1.27; see the design doc's message/send section)
 - [ ] `Process()` loop handles `a2aPassthrough` in `ResponseBody` phase like `rewriter`
 - [ ] Unit tests: SSE chunks pass through; upstream task IDs replaced with gateway task IDs; non-SSE responses unaffected
 
