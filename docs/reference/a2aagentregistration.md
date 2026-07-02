@@ -30,7 +30,7 @@
 | `group` | String | No | Group of the target resource. Default: `gateway.networking.k8s.io` |
 | `kind` | String | No | Kind of the target resource. Default: `HTTPRoute` |
 | `name` | String | Yes | Name of the target HTTPRoute |
-| `namespace` | String | No | Namespace of the target HTTPRoute. Defaults to the registration's own namespace |
+| `namespace` | String | No | Namespace of the target HTTPRoute. Defaults to the registration's own namespace. Cross-namespace references require a `ReferenceGrant` in the target namespace (`from`: `A2AAgentRegistration`, `to`: `HTTPRoute`); without one the registration is `Ready=False` and no config is written, and revoking the grant withdraws the agent's config |
 
 ## SecretReference
 

@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	mcpv1alpha1 "github.com/Kuadrant/mcp-gateway/api/v1alpha1"
 	"github.com/Kuadrant/mcp-gateway/internal/config"
@@ -29,6 +30,10 @@ const (
 
 	// A2AHTTPRouteIndex indexes A2AAgentRegistrations by their target HTTPRoute (namespace/name).
 	A2AHTTPRouteIndex = "spec.targetRef.a2ahttproute"
+
+	// A2ATargetNamespaceIndex indexes A2AAgentRegistrations by the namespace their targetRef
+	// resolves into, so ReferenceGrant changes in that namespace trigger re-reconciles.
+	A2ATargetNamespaceIndex = "spec.targetRef.a2anamespace"
 )
 
 // A2AAgentConfigReaderWriter adds and removes A2AAgents to the config
@@ -87,6 +92,25 @@ func (r *A2AReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{RequeueAfter: defaultRequeueTime}, nil
+		}
+	}
+
+	// a cross-namespace targetRef needs the route namespace's consent: being able to
+	// create a registration is not permission to expose another namespace's agent
+	routeNamespace := targetRefNamespace(a2areg.Namespace, a2areg.Spec.TargetRef)
+	if routeNamespace != a2areg.Namespace {
+		granted, err := r.hasValidReferenceGrantForRoute(ctx, a2areg, routeNamespace)
+		if err != nil {
+			return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+		}
+		if !granted {
+			// a grant is an explicit consent state, not a transient failure: withdraw any
+			// previously written config so revoking the grant actually revokes the exposure
+			if err := r.ConfigReaderWriter.RemoveA2AAgent(ctx, a2aAgentName(a2areg)); err != nil {
+				return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+			}
+			msg := fmt.Sprintf("cross-namespace targetRef requires a ReferenceGrant in namespace %s permitting A2AAgentRegistration to reference HTTPRoute", routeNamespace)
+			return r.failStatus(ctx, a2areg, conditionReasonNotReady, msg, nil)
 		}
 	}
 
@@ -187,6 +211,52 @@ func targetRefNamespace(defaultNamespace string, targetRef mcpv1alpha1.TargetRef
 		return targetRef.Namespace
 	}
 	return defaultNamespace
+}
+
+// hasValidReferenceGrantForRoute reports whether a ReferenceGrant in the route's namespace
+// permits this registration to reference HTTPRoutes there — the same consent model
+// MCPGatewayExtension uses for cross-namespace Gateway references.
+func (r *A2AReconciler) hasValidReferenceGrantForRoute(ctx context.Context, a2areg *mcpv1alpha1.A2AAgentRegistration, routeNamespace string) (bool, error) {
+	refGrantList := &gatewayv1beta1.ReferenceGrantList{}
+	if err := r.List(ctx, refGrantList, client.InNamespace(routeNamespace)); err != nil {
+		return false, fmt.Errorf("failed to list ReferenceGrants: %w", err)
+	}
+	for i := range refGrantList.Items {
+		if referenceGrantAllowsA2ARouteRef(&refGrantList.Items[i], a2areg) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// referenceGrantAllowsA2ARouteRef checks if a ReferenceGrant permits the A2AAgentRegistration
+// to reference its target HTTPRoute.
+func referenceGrantAllowsA2ARouteRef(rg *gatewayv1beta1.ReferenceGrant, a2areg *mcpv1alpha1.A2AAgentRegistration) bool {
+	fromAllowed := false
+	for _, from := range rg.Spec.From {
+		if string(from.Group) == mcpv1alpha1.GroupVersion.Group &&
+			string(from.Kind) == "A2AAgentRegistration" &&
+			string(from.Namespace) == a2areg.Namespace {
+			fromAllowed = true
+			break
+		}
+	}
+	if !fromAllowed {
+		return false
+	}
+
+	for _, to := range rg.Spec.To {
+		if string(to.Group) == gatewayv1.GroupVersion.Group {
+			// empty kind means all kinds in the group
+			if to.Kind == "" || string(to.Kind) == "HTTPRoute" {
+				// if name is specified, it must match; empty means all
+				if to.Name == nil || *to.Name == "" || string(*to.Name) == a2areg.Spec.TargetRef.Name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (r *A2AReconciler) getTargetHTTPRoute(ctx context.Context, a2areg *mcpv1alpha1.A2AAgentRegistration) (*gatewayv1.HTTPRoute, error) {
@@ -305,6 +375,9 @@ func (r *A2AReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) 
 	if err := setupIndexA2ARegistrationToHTTPRoute(ctx, mgr.GetFieldIndexer()); err != nil {
 		return fmt.Errorf("failed to setup required index from A2AAgentRegistration to httproutes %w", err)
 	}
+	if err := setupIndexA2ARegistrationToTargetNamespace(ctx, mgr.GetFieldIndexer()); err != nil {
+		return fmt.Errorf("failed to setup required index from A2AAgentRegistration to target namespaces %w", err)
+	}
 
 	controller := ctrl.NewControllerManagedBy(mgr).
 		For(&mcpv1alpha1.A2AAgentRegistration{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
@@ -326,6 +399,11 @@ func (r *A2AReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) 
 			handler.EnqueueRequestsFromMapFunc(r.findA2AAgentRegistrationsForMCPGatewayExtension),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
+		Watches(
+			&gatewayv1beta1.ReferenceGrant{},
+			handler.EnqueueRequestsFromMapFunc(r.findA2AAgentRegistrationsForReferenceGrant),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		Named("a2aagentregistration")
 
 	return controller.Complete(r)
@@ -342,6 +420,43 @@ func setupIndexA2ARegistrationToHTTPRoute(ctx context.Context, indexer client.Fi
 		}
 		return []string{}
 	})
+}
+
+// setupIndexA2ARegistrationToTargetNamespace indexes registrations by the namespace their
+// targetRef resolves into, used by the ReferenceGrant watch.
+func setupIndexA2ARegistrationToTargetNamespace(ctx context.Context, indexer client.FieldIndexer) error {
+	return indexer.IndexField(ctx, &mcpv1alpha1.A2AAgentRegistration{}, A2ATargetNamespaceIndex, func(rawObj client.Object) []string {
+		a2areg := rawObj.(*mcpv1alpha1.A2AAgentRegistration)
+		return []string{targetRefNamespace(a2areg.Namespace, a2areg.Spec.TargetRef)}
+	})
+}
+
+// findA2AAgentRegistrationsForReferenceGrant finds registrations whose targetRef resolves into
+// the grant's namespace, so granting or revoking consent triggers a re-reconcile.
+func (r *A2AReconciler) findA2AAgentRegistrationsForReferenceGrant(ctx context.Context, obj client.Object) []reconcile.Request {
+	rg := obj.(*gatewayv1beta1.ReferenceGrant)
+	log := logf.FromContext(ctx).WithValues("ReferenceGrant", rg.Name, "namespace", rg.Namespace)
+
+	a2aregList := &mcpv1alpha1.A2AAgentRegistrationList{}
+	if err := r.List(ctx, a2aregList, client.MatchingFields{A2ATargetNamespaceIndex: rg.Namespace}); err != nil {
+		log.Error(err, "Failed to list A2AAgentRegistrations using target namespace index")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for i := range a2aregList.Items {
+		// same-namespace references never need a grant
+		if a2aregList.Items[i].Namespace == rg.Namespace {
+			continue
+		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      a2aregList.Items[i].Name,
+				Namespace: a2aregList.Items[i].Namespace,
+			},
+		})
+	}
+	return requests
 }
 
 // findA2AAgentRegistrationsForHTTPRoute finds all A2AAgentRegistrations that reference the given HTTPRoute

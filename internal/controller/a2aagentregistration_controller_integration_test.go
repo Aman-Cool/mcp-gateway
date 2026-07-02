@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	mcpv1alpha1 "github.com/Kuadrant/mcp-gateway/api/v1alpha1"
 	"github.com/Kuadrant/mcp-gateway/internal/config"
@@ -324,6 +325,7 @@ var _ = Describe("A2AAgentRegistration Controller", func() {
 
 	Context("When targetRef references an HTTPRoute in another namespace", func() {
 		const routeNamespace = "a2a-routes"
+		const grantName = "a2a-route-grant"
 
 		BeforeEach(func() {
 			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: routeNamespace}}
@@ -361,12 +363,16 @@ var _ = Describe("A2AAgentRegistration Controller", func() {
 		AfterEach(func() {
 			forceDeleteTestA2AAgentRegistration(ctx, resourceName, "default")
 			forceDeleteTestMCPGatewayExtension(ctx, extName, "default")
+			_ = deleteTestReferenceGrant(ctx, grantName, routeNamespace)
 			deleteTestHTTPRoute(ctx, httpRouteName, routeNamespace)
 			deleteTestService(ctx, serviceName, routeNamespace)
 			deleteTestGateway(ctx, gatewayName, "default")
 		})
 
-		It("should resolve the cross-namespace route and set Ready=True", func() {
+		It("should resolve the cross-namespace route and set Ready=True when a ReferenceGrant permits it", func() {
+			grant := createTestA2AReferenceGrant(grantName, routeNamespace, "default")
+			Expect(testK8sClient.Create(ctx, grant)).To(Succeed())
+
 			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "crossagent")
 			a2areg.Spec.TargetRef.Namespace = routeNamespace
 			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
@@ -392,5 +398,85 @@ var _ = Describe("A2AAgentRegistration Controller", func() {
 				g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			}, testTimeout, testRetryInterval).Should(Succeed())
 		})
+
+		It("should set Ready=False and write no config without a ReferenceGrant", func() {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "crossagent")
+			a2areg.Spec.TargetRef.Namespace = routeNamespace
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(ready.Message).To(ContainSubstring("ReferenceGrant"))
+			})
+
+			Expect(configWriter.upsertedAgents).To(BeEmpty())
+		})
+
+		It("should withdraw the agent config when the ReferenceGrant is revoked", func() {
+			grant := createTestA2AReferenceGrant(grantName, routeNamespace, "default")
+			Expect(testK8sClient.Create(ctx, grant)).To(Succeed())
+
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "crossagent")
+			a2areg.Spec.TargetRef.Namespace = routeNamespace
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			// exposed while consent holds
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			})
+
+			// revoke consent
+			Expect(deleteTestReferenceGrant(ctx, grantName, routeNamespace)).To(Succeed())
+
+			// revocation withdraws the config and flips Ready=False
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.removedAgents).To(ContainElement("default/" + resourceName))
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(ready.Message).To(ContainSubstring("ReferenceGrant"))
+			})
+		})
 	})
 })
+
+// createTestA2AReferenceGrant creates a ReferenceGrant in the route's namespace permitting
+// A2AAgentRegistrations from fromNamespace to reference HTTPRoutes.
+func createTestA2AReferenceGrant(name, namespace, fromNamespace string) *gatewayv1beta1.ReferenceGrant {
+	return &gatewayv1beta1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1beta1.ReferenceGrantFrom{
+				{
+					Group:     gatewayv1beta1.Group(mcpv1alpha1.GroupVersion.Group),
+					Kind:      "A2AAgentRegistration",
+					Namespace: gatewayv1beta1.Namespace(fromNamespace),
+				},
+			},
+			To: []gatewayv1beta1.ReferenceGrantTo{
+				{
+					Group: gatewayv1beta1.Group(gatewayv1.GroupVersion.Group),
+					Kind:  "HTTPRoute",
+				},
+			},
+		},
+	}
+}
+

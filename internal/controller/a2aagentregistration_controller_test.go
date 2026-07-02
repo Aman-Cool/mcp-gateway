@@ -6,11 +6,60 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	mcpv1alpha1 "github.com/Kuadrant/mcp-gateway/api/v1alpha1"
 )
+
+func TestReferenceGrantAllowsA2ARouteRef(t *testing.T) {
+	a2areg := &mcpv1alpha1.A2AAgentRegistration{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "registrations"},
+		Spec: mcpv1alpha1.A2AAgentRegistrationSpec{
+			TargetRef: mcpv1alpha1.TargetReference{Kind: "HTTPRoute", Name: "target-route", Namespace: "routes"},
+		},
+	}
+
+	grant := func(fromKind, fromNS, toKind string, toName *string) *gatewayv1beta1.ReferenceGrant {
+		return &gatewayv1beta1.ReferenceGrant{
+			Spec: gatewayv1beta1.ReferenceGrantSpec{
+				From: []gatewayv1beta1.ReferenceGrantFrom{{
+					Group:     gatewayv1beta1.Group(mcpv1alpha1.GroupVersion.Group),
+					Kind:      gatewayv1beta1.Kind(fromKind),
+					Namespace: gatewayv1beta1.Namespace(fromNS),
+				}},
+				To: []gatewayv1beta1.ReferenceGrantTo{{
+					Group: gatewayv1beta1.Group(gatewayv1.GroupVersion.Group),
+					Kind:  gatewayv1beta1.Kind(toKind),
+					Name:  (*gatewayv1.ObjectName)(toName),
+				}},
+			},
+		}
+	}
+
+	cases := []struct {
+		name string
+		rg   *gatewayv1beta1.ReferenceGrant
+		want bool
+	}{
+		{"exact match", grant("A2AAgentRegistration", "registrations", "HTTPRoute", nil), true},
+		{"named route match", grant("A2AAgentRegistration", "registrations", "HTTPRoute", ptr.To("target-route")), true},
+		{"named route mismatch", grant("A2AAgentRegistration", "registrations", "HTTPRoute", ptr.To("other-route")), false},
+		{"wrong from kind", grant("MCPServerRegistration", "registrations", "HTTPRoute", nil), false},
+		{"wrong from namespace", grant("A2AAgentRegistration", "other-ns", "HTTPRoute", nil), false},
+		{"wrong to kind", grant("A2AAgentRegistration", "registrations", "Gateway", nil), false},
+		{"empty to kind allows all in group", grant("A2AAgentRegistration", "registrations", "", nil), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := referenceGrantAllowsA2ARouteRef(c.rg, a2areg); got != c.want {
+				t.Errorf("referenceGrantAllowsA2ARouteRef() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
 
 func TestTargetRefNamespace(t *testing.T) {
 	cases := []struct {
