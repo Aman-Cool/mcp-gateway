@@ -197,6 +197,7 @@ type Observer interface {
 type BrokerConfig struct {
 	Servers        []MCPServer           `json:"servers" yaml:"servers"`
 	VirtualServers []VirtualServerConfig `json:"virtualServers,omitempty" yaml:"virtualServers,omitempty"`
+	A2AAgents      []A2AAgent            `json:"a2aAgents,omitempty" yaml:"a2aAgents,omitempty"`
 }
 
 // AuthConfig holds auth configuration

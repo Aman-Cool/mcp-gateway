@@ -1,0 +1,396 @@
+//go:build integration
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	mcpv1alpha1 "github.com/Kuadrant/mcp-gateway/api/v1alpha1"
+	"github.com/Kuadrant/mcp-gateway/internal/config"
+)
+
+// mockA2AConfigReaderWriter is a mock for testing
+type mockA2AConfigReaderWriter struct {
+	upsertedAgents map[string]config.A2AAgent
+	removedAgents  []string
+}
+
+func newMockA2AConfigReaderWriter() *mockA2AConfigReaderWriter {
+	return &mockA2AConfigReaderWriter{
+		upsertedAgents: make(map[string]config.A2AAgent),
+		removedAgents:  []string{},
+	}
+}
+
+func (m *mockA2AConfigReaderWriter) UpsertA2AAgent(_ context.Context, agent config.A2AAgent, namespaceName types.NamespacedName) error {
+	key := fmt.Sprintf("%s/%s", namespaceName.Namespace, agent.Name)
+	m.upsertedAgents[key] = agent
+	return nil
+}
+
+func (m *mockA2AConfigReaderWriter) RemoveA2AAgent(_ context.Context, agentName string) error {
+	m.removedAgents = append(m.removedAgents, agentName)
+	return nil
+}
+
+// createTestA2AAgentRegistration creates an A2AAgentRegistration for testing
+func createTestA2AAgentRegistration(name, namespace, httpRouteName, prefix string) *mcpv1alpha1.A2AAgentRegistration {
+	return &mcpv1alpha1.A2AAgentRegistration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: mcpv1alpha1.A2AAgentRegistrationSpec{
+			TargetRef: mcpv1alpha1.TargetReference{
+				Group: "gateway.networking.k8s.io",
+				Kind:  "HTTPRoute",
+				Name:  httpRouteName,
+			},
+			AgentPrefix: prefix,
+		},
+	}
+}
+
+// forceDeleteTestA2AAgentRegistration removes finalizers and deletes
+func forceDeleteTestA2AAgentRegistration(ctx context.Context, name, namespace string) {
+	nn := types.NamespacedName{Name: name, Namespace: namespace}
+	resource := &mcpv1alpha1.A2AAgentRegistration{}
+	err := testK8sClient.Get(ctx, nn, resource)
+	if errors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	if controllerutil.ContainsFinalizer(resource, a2aGatewayFinalizer) {
+		controllerutil.RemoveFinalizer(resource, a2aGatewayFinalizer)
+		Expect(testK8sClient.Update(ctx, resource)).To(Succeed())
+	}
+
+	Expect(client.IgnoreNotFound(testK8sClient.Delete(ctx, resource))).To(Succeed())
+
+	Eventually(func(g Gomega) {
+		err := testK8sClient.Get(ctx, nn, resource)
+		g.Expect(errors.IsNotFound(err)).To(BeTrue())
+	}, testTimeout, testRetryInterval).Should(Succeed())
+}
+
+// newA2AReconciler creates an A2AReconciler for testing
+func newA2AReconciler(configWriter *mockA2AConfigReaderWriter) *A2AReconciler {
+	return &A2AReconciler{
+		Client:             testIndexedClient,
+		Scheme:             testK8sClient.Scheme(),
+		DirectAPIReader:    testK8sClient,
+		ConfigReaderWriter: configWriter,
+		MCPExtFinderValidator: &MCPGatewayExtensionValidator{
+			Client:          testIndexedClient,
+			DirectAPIReader: testK8sClient,
+			Logger:          slog.New(slog.NewTextHandler(GinkgoWriter, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		},
+	}
+}
+
+// waitForA2ARegistrationCacheSync waits for cache to see the resource
+func waitForA2ARegistrationCacheSync(ctx context.Context, nn types.NamespacedName) {
+	Eventually(func(g Gomega) {
+		cached := &mcpv1alpha1.A2AAgentRegistration{}
+		g.Expect(testIndexedClient.Get(ctx, nn, cached)).To(Succeed())
+	}, testTimeout, testRetryInterval).Should(Succeed())
+}
+
+// reconcileA2AUntil re-reconciles until probe passes: the first pass adds the finalizer
+// and requeues, and stale-cache reads (finalizer, extension Ready status) resolve across
+// retries. A clean-but-unsuccessful pass (e.g. extension not yet visible in the cache)
+// is retried rather than accepted, which is why settling on "no requeue" is not enough.
+func reconcileA2AUntil(ctx context.Context, reconciler *A2AReconciler, nn types.NamespacedName, probe func(g Gomega)) {
+	Eventually(func(g Gomega) {
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		g.Expect(err).NotTo(HaveOccurred())
+		probe(g)
+	}, testTimeout, testRetryInterval).Should(Succeed())
+}
+
+var _ = Describe("A2AAgentRegistration Controller", func() {
+	const (
+		resourceName  = "test-a2areg"
+		httpRouteName = "test-a2a-route"
+		gatewayName   = "test-a2a-gw"
+		serviceName   = "test-a2a-svc"
+		extName       = "test-a2a-ext"
+	)
+
+	ctx := context.Background()
+
+	a2aNamespacedName := types.NamespacedName{
+		Name:      resourceName,
+		Namespace: "default",
+	}
+
+	setupGatewayFixtures := func() {
+		gw := createTestGateway(gatewayName, "default", "a2a-test.mcp.local")
+		Expect(testK8sClient.Create(ctx, gw)).To(Succeed())
+
+		svc := createTestService(serviceName, "default", 9090)
+		Expect(testK8sClient.Create(ctx, svc)).To(Succeed())
+
+		httpRoute := createTestHTTPRoute(httpRouteName, "default", "a2a-test.mcp.local", serviceName, 9090, gatewayName, "default")
+		Expect(testK8sClient.Create(ctx, httpRoute)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			route := &gatewayv1.HTTPRoute{}
+			g.Expect(testK8sClient.Get(ctx, types.NamespacedName{Name: httpRouteName, Namespace: "default"}, route)).To(Succeed())
+			g.Expect(setHTTPRouteAcceptedStatus(ctx, route, gatewayName, "default")).To(Succeed())
+		}, testTimeout, testRetryInterval).Should(Succeed())
+
+		mcpExt := createTestMCPGatewayExtension(extName, "default", gatewayName, "default")
+		Expect(testK8sClient.Create(ctx, mcpExt)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			ext := &mcpv1alpha1.MCPGatewayExtension{}
+			g.Expect(testK8sClient.Get(ctx, types.NamespacedName{Name: extName, Namespace: "default"}, ext)).To(Succeed())
+			ext.SetReadyCondition(metav1.ConditionTrue, mcpv1alpha1.ConditionReasonSuccess, "ready")
+			g.Expect(testK8sClient.Status().Update(ctx, ext)).To(Succeed())
+		}, testTimeout, testRetryInterval).Should(Succeed())
+	}
+
+	teardownGatewayFixtures := func() {
+		forceDeleteTestA2AAgentRegistration(ctx, resourceName, "default")
+		forceDeleteTestMCPGatewayExtension(ctx, extName, "default")
+		deleteTestHTTPRoute(ctx, httpRouteName, "default")
+		deleteTestService(ctx, serviceName, "default")
+		deleteTestGateway(ctx, gatewayName, "default")
+	}
+
+	Context("When reconciling a valid registration", func() {
+		BeforeEach(setupGatewayFixtures)
+		AfterEach(teardownGatewayFixtures)
+
+		It("should add the a2a finalizer on first reconcile", func() {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "weather")
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: a2aNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				g.Expect(controllerutil.ContainsFinalizer(updated, a2aGatewayFinalizer)).To(BeTrue())
+			}, testTimeout, testRetryInterval).Should(Succeed())
+		})
+
+		It("should write agent config and set Ready=True", func() {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "weather")
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			})
+
+			// config written to the extension's namespace with the derived endpoint
+			key := fmt.Sprintf("default/%s", a2aAgentName(&mcpv1alpha1.A2AAgentRegistration{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+			}))
+			agent, ok := configWriter.upsertedAgents[key]
+			Expect(ok).To(BeTrue(), "expected agent config upserted for %s, got %v", key, configWriter.upsertedAgents)
+			Expect(agent.AgentPrefix).To(Equal("weather"))
+			Expect(agent.URL).To(Equal(fmt.Sprintf("http://%s.default.svc.cluster.local:9090", serviceName)))
+			Expect(agent.Hostname).To(Equal("a2a-test.mcp.local"))
+
+			Eventually(func(g Gomega) {
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+		})
+
+		It("should call RemoveA2AAgent and drop the finalizer on deletion", func() {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "weather")
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			})
+
+			resource := &mcpv1alpha1.A2AAgentRegistration{}
+			Expect(testK8sClient.Get(ctx, a2aNamespacedName, resource)).To(Succeed())
+			Expect(testK8sClient.Delete(ctx, resource)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				cached := &mcpv1alpha1.A2AAgentRegistration{}
+				err := testIndexedClient.Get(ctx, a2aNamespacedName, cached)
+				if errors.IsNotFound(err) {
+					return
+				}
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cached.DeletionTimestamp).NotTo(BeNil())
+			}, testTimeout, testRetryInterval).Should(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: a2aNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(configWriter.removedAgents).To(ContainElement("default/" + resourceName))
+
+			Eventually(func(g Gomega) {
+				deleted := &mcpv1alpha1.A2AAgentRegistration{}
+				err := testK8sClient.Get(ctx, a2aNamespacedName, deleted)
+				g.Expect(errors.IsNotFound(err)).To(BeTrue())
+			}, testTimeout, testRetryInterval).Should(Succeed())
+		})
+
+		It("should set Ready=False with reason Disabled when state is Disabled", func() {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "weather")
+			a2areg.Spec.State = mcpv1alpha1.ServerStateDisabled
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			})
+
+			// config is still written (state travels in the config), status reflects disabled
+			Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			Eventually(func(g Gomega) {
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(ready.Reason).To(Equal(conditionReasonDisabled))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+		})
+	})
+
+	Context("When the target HTTPRoute does not exist", func() {
+		AfterEach(func() {
+			forceDeleteTestA2AAgentRegistration(ctx, resourceName, "default")
+		})
+
+		It("should set Ready=False", func() {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", "missing-route", "weather")
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			// first pass adds the finalizer and requeues; a later pass fails on the missing route
+			Eventually(func(g Gomega) {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: a2aNamespacedName})
+				g.Expect(err).To(HaveOccurred())
+			}, testTimeout, testRetryInterval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(ready.Reason).To(Equal(conditionReasonNotReady))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+			Expect(configWriter.upsertedAgents).To(BeEmpty())
+		})
+	})
+
+	Context("When targetRef references an HTTPRoute in another namespace", func() {
+		const routeNamespace = "a2a-routes"
+
+		BeforeEach(func() {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: routeNamespace}}
+			err := testK8sClient.Create(ctx, ns)
+			if err != nil && !errors.IsAlreadyExists(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			gw := createTestGateway(gatewayName, "default", "a2a-cross.mcp.local")
+			Expect(testK8sClient.Create(ctx, gw)).To(Succeed())
+
+			svc := createTestService(serviceName, routeNamespace, 9090)
+			Expect(testK8sClient.Create(ctx, svc)).To(Succeed())
+
+			httpRoute := createTestHTTPRoute(httpRouteName, routeNamespace, "a2a-cross.mcp.local", serviceName, 9090, gatewayName, "default")
+			Expect(testK8sClient.Create(ctx, httpRoute)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				route := &gatewayv1.HTTPRoute{}
+				g.Expect(testK8sClient.Get(ctx, types.NamespacedName{Name: httpRouteName, Namespace: routeNamespace}, route)).To(Succeed())
+				g.Expect(setHTTPRouteAcceptedStatus(ctx, route, gatewayName, "default")).To(Succeed())
+			}, testTimeout, testRetryInterval).Should(Succeed())
+
+			mcpExt := createTestMCPGatewayExtension(extName, "default", gatewayName, "default")
+			Expect(testK8sClient.Create(ctx, mcpExt)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				ext := &mcpv1alpha1.MCPGatewayExtension{}
+				g.Expect(testK8sClient.Get(ctx, types.NamespacedName{Name: extName, Namespace: "default"}, ext)).To(Succeed())
+				ext.SetReadyCondition(metav1.ConditionTrue, mcpv1alpha1.ConditionReasonSuccess, "ready")
+				g.Expect(testK8sClient.Status().Update(ctx, ext)).To(Succeed())
+			}, testTimeout, testRetryInterval).Should(Succeed())
+		})
+
+		AfterEach(func() {
+			forceDeleteTestA2AAgentRegistration(ctx, resourceName, "default")
+			forceDeleteTestMCPGatewayExtension(ctx, extName, "default")
+			deleteTestHTTPRoute(ctx, httpRouteName, routeNamespace)
+			deleteTestService(ctx, serviceName, routeNamespace)
+			deleteTestGateway(ctx, gatewayName, "default")
+		})
+
+		It("should resolve the cross-namespace route and set Ready=True", func() {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "crossagent")
+			a2areg.Spec.TargetRef.Namespace = routeNamespace
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			})
+
+			Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			for _, agent := range configWriter.upsertedAgents {
+				Expect(agent.URL).To(Equal(fmt.Sprintf("http://%s.%s.svc.cluster.local:9090", serviceName, routeNamespace)))
+			}
+
+			Eventually(func(g Gomega) {
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+		})
+	})
+})

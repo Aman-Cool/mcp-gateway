@@ -252,6 +252,104 @@ func (srw *SecretReaderWriter) RemoveMCPServer(ctx context.Context, serverName s
 	return lastErr
 }
 
+// UpsertA2AAgent updates or inserts a single A2AAgent in the config secret.
+// If an agent with the same Name already exists, it is replaced. Otherwise, the
+// agent is appended to the list. This uses a read-modify-write pattern with
+// automatic retry on conflict errors.
+func (srw *SecretReaderWriter) UpsertA2AAgent(ctx context.Context, agent A2AAgent, namespaceName types.NamespacedName) error {
+	srw.Logger.Info("SecretReaderWriter UpsertA2AAgent", "secret", namespaceName, "name", agent.Name)
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		existingConfig, backingSecret, err := srw.readOrCreateConfigSecret(ctx, namespaceName)
+		if err != nil {
+			return fmt.Errorf("upsert a2aagent failed to read config secret: %w", err)
+		}
+
+		// find and replace existing agent, or append if not found
+		found := false
+		for i, existing := range existingConfig.A2AAgents {
+			if existing.Name == agent.Name {
+				if !agent.ConfigChanged(existing) {
+					// config unchanged, skip write to avoid unnecessary secret updates
+					// that trigger broker config reloads
+					srw.Logger.Info("SecretReaderWriter UpsertA2AAgent config unchanged, skipping write", "name", agent.Name)
+					return nil
+				}
+				existingConfig.A2AAgents[i] = agent
+				found = true
+				break
+			}
+		}
+		if !found {
+			existingConfig.A2AAgents = append(existingConfig.A2AAgents, agent)
+		}
+
+		updated, err := yaml.Marshal(existingConfig)
+		if err != nil {
+			return fmt.Errorf("upsert a2aagent failed to marshal config: %w", err)
+		}
+		srw.Logger.Info("SecretReaderWriter total a2a agents now", "total", len(existingConfig.A2AAgents))
+		backingSecret.StringData[configFileName] = string(updated)
+		return srw.Client.Update(ctx, backingSecret)
+	})
+}
+
+// RemoveA2AAgent removes a single A2AAgent by name from all config secrets cluster-wide.
+// It finds all secrets with the "mcp.kuadrant.io/aggregated": "true" label and removes
+// the agent from each. If the agent doesn't exist in a secret, that secret is skipped.
+// This uses a read-modify-write pattern with automatic retry on conflict errors.
+func (srw *SecretReaderWriter) RemoveA2AAgent(ctx context.Context, agentName string) error {
+	srw.Logger.Info("SecretReaderWriter RemoveA2AAgent")
+	secretList := &corev1.SecretList{}
+	if err := srw.Client.List(ctx, secretList, client.MatchingLabels{
+		"mcp.kuadrant.io/aggregated": "true",
+	}); err != nil {
+		return fmt.Errorf("remove a2aagent failed to list config secrets: %w", err)
+	}
+
+	var lastErr error
+	for _, secret := range secretList.Items {
+		namespaceName := types.NamespacedName{Namespace: secret.Namespace, Name: secret.Name}
+		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			existingConfig, backingSecret, err := srw.readOrCreateConfigSecret(ctx, namespaceName)
+			if err != nil {
+				return fmt.Errorf("remove a2aagent failed to read config secret: %w", err)
+			}
+
+			// check if agent exists in this config
+			found := false
+			filtered := make([]A2AAgent, 0, len(existingConfig.A2AAgents))
+			for _, existing := range existingConfig.A2AAgents {
+				if existing.Name == agentName {
+					found = true
+				} else {
+					filtered = append(filtered, existing)
+				}
+			}
+
+			// skip update if agent wasn't in this config
+			if !found {
+				return nil
+			}
+
+			existingConfig.A2AAgents = filtered
+			updated, err := yaml.Marshal(existingConfig)
+			if err != nil {
+				return fmt.Errorf("remove a2aagent failed to marshal config: %w", err)
+			}
+
+			backingSecret.StringData[configFileName] = string(updated)
+			return srw.Client.Update(ctx, backingSecret)
+		})
+		if err != nil {
+			lastErr = err
+			srw.Logger.Error("failed to remove a2a agent from config secret",
+				"error", err, "agentName", agentName, "namespace", secret.Namespace)
+		}
+	}
+
+	return lastErr
+}
+
 // DeleteConfig deletes the entire config secret. If the secret doesn't exist,
 // this is a no-op and returns nil.
 func (srw *SecretReaderWriter) DeleteConfig(ctx context.Context, namespaceName types.NamespacedName) error {
