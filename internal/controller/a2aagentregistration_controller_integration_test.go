@@ -323,6 +323,111 @@ var _ = Describe("A2AAgentRegistration Controller", func() {
 		})
 	})
 
+	Context("When the registration has a credentialRef", func() {
+		const secretName = "a2a-agent-secret"
+
+		BeforeEach(setupGatewayFixtures)
+		AfterEach(func() {
+			teardownGatewayFixtures()
+			_ = client.IgnoreNotFound(testK8sClient.Delete(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+			}))
+		})
+
+		createSecret := func(labeled bool, key string) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      secretName,
+					Namespace: "default",
+				},
+				Data: map[string][]byte{
+					key: []byte("Bearer agent-token"),
+				},
+			}
+			if labeled {
+				secret.Labels = map[string]string{"mcp.kuadrant.io/secret": "true"}
+			}
+			Expect(testK8sClient.Create(ctx, secret)).To(Succeed())
+		}
+
+		newRegistrationWithCredential := func() *mcpv1alpha1.A2AAgentRegistration {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "weather")
+			a2areg.Spec.CredentialRef = &mcpv1alpha1.SecretReference{Name: secretName, Key: "token"}
+			return a2areg
+		}
+
+		It("should include the credential in config when the labeled secret exists", func() {
+			createSecret(true, "token")
+			Expect(testK8sClient.Create(ctx, newRegistrationWithCredential())).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			})
+			for _, agent := range configWriter.upsertedAgents {
+				Expect(agent.Credential).To(Equal("Bearer agent-token"))
+			}
+		})
+
+		It("should set Ready=False when the secret is missing the required label", func() {
+			createSecret(false, "token")
+			Expect(testK8sClient.Create(ctx, newRegistrationWithCredential())).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			Eventually(func(g Gomega) {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: a2aNamespacedName})
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(ContainSubstring("missing required label"))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+			Expect(configWriter.upsertedAgents).To(BeEmpty())
+		})
+
+		It("should set Ready=False when the secret is missing the key", func() {
+			createSecret(true, "wrong-key")
+			Expect(testK8sClient.Create(ctx, newRegistrationWithCredential())).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			Eventually(func(g Gomega) {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: a2aNamespacedName})
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(ContainSubstring("missing key"))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+			Expect(configWriter.upsertedAgents).To(BeEmpty())
+		})
+
+		It("should set Ready=False when the secret does not exist", func() {
+			Expect(testK8sClient.Create(ctx, newRegistrationWithCredential())).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			Eventually(func(g Gomega) {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: a2aNamespacedName})
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(ContainSubstring("not found"))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+			Expect(configWriter.upsertedAgents).To(BeEmpty())
+
+			Eventually(func(g Gomega) {
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+		})
+	})
+
 	Context("A2AAgentRegistration CRD validation", func() {
 		AfterEach(func() {
 			forceDeleteTestA2AAgentRegistration(ctx, "cel-probe", "default")
