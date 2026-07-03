@@ -285,6 +285,10 @@ var _ = Describe("Elicitation", Ordered, ContinueOnFailure, func() {
 			cred := BuildCredentialSecret("url-elicit-cred", "test-api-key-secret-token")
 			cred.Namespace = elicitNamespace
 			CleanupResource(ctx, k8sClient, cred)
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cred), &corev1.Secret{})
+				g.Expect(err).To(HaveOccurred(), "secret should be gone before re-creation")
+			}, TestTimeoutShort, TestRetryInterval).Should(Succeed())
 
 			By("Registering api-key-server with tokenURLElicitation and credentialRef")
 			cred = BuildCredentialSecret("url-elicit-cred", "test-api-key-secret-token")

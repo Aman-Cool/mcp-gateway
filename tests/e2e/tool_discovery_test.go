@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	mcpv1alpha1 "github.com/Kuadrant/mcp-gateway/api/v1alpha1"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -513,10 +512,13 @@ var _ = Describe("Tool Discovery", Ordered, func() {
 				g.Expect(VerifyMCPServerRegistrationReady(ctx, k8sClient, server.Name, server.Namespace)).To(Succeed())
 			}, TestTimeoutLong, TestRetryInterval).Should(Succeed())
 
-			var receivedNotification atomic.Bool
+			notifCh := make(chan struct{}, 1)
 			client, err := NewMCPGatewayClientWithNotifications(ctx, toolDiscURL, func(j mcp.JSONRPCNotification) {
 				if j.Method == "notifications/tools/list_changed" {
-					receivedNotification.Store(true)
+					select {
+					case notifCh <- struct{}{}:
+					default:
+					}
 				}
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -530,9 +532,7 @@ var _ = Describe("Tool Discovery", Ordered, func() {
 			Expect(status).To(Equal(200))
 
 			By("verifying notification was received")
-			Eventually(func() bool {
-				return receivedNotification.Load()
-			}, TestTimeoutShort, TestRetryInterval).Should(BeTrue(),
+			Eventually(notifCh, TestTimeoutShort, TestRetryInterval).Should(Receive(),
 				"should have received notifications/tools/list_changed after select_tools")
 		})
 	})
