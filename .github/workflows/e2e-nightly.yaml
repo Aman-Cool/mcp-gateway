@@ -33,7 +33,9 @@ jobs:
       - name: Determine test-server image source
         id: test-server-images
         run: |
-          source=pull
+          # fork: test-server images (test-a2a-server) are not published to
+          # ghcr.io/kuadrant, so always build them in CI instead of pulling
+          source=build
           if ! git fetch --quiet --depth=1 origin main; then
             echo "could not fetch origin main, building test servers locally"
             source=build
