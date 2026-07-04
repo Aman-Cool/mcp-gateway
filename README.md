@@ -126,6 +126,7 @@ timeline
     June 29 : Nine-point maintainer review — v1.0 target, tenant field, signed cards, fork workflow
     July 1 : Revised design up ; two OPEN decisions remain (v1.0 confirm, namespace-qualified paths)
     July 2 : This fork opens for business — spike 1, per-method response ModeOverride : Verified same day against real Envoy — BUFFERED + STREAMED honored mid-request, content-length constraint found + recorded
+    July 5 : CRD + controller merged (PR 3) — 56/56 envtest specs, live-verified on Kind, full upstream CI green : Cross-namespace registration gated behind ReferenceGrant consent ; revoking a grant withdraws the config, not just the status
 ```
 
 The pivot in the middle is the story worth telling: the original design routed by reading a `skill` out of the `message/send` body, and the spec pass revealed that field **doesn't exist** — `MessageSendParams` is `{message, configuration, metadata}`, skills live only in the card. So routing moved to a path per agent (`/a2a/{prefix}`), which is also what [agentgateway](https://agentgateway.dev) converged on, and which turns out to be Kuadrant-optimal anyway.., policies attach to HTTPRoutes, and a path per agent means an *operator can attach a distinct AuthPolicy and RateLimitPolicy per agent*. The protocol forced a change that made the design better.
@@ -137,8 +138,10 @@ The pivot in the middle is the story worth telling: the original design routed b
 | Design doc (routing, CRD, card serving, auth, task store) | [Kuadrant#1114](https://github.com/Kuadrant/mcp-gateway/pull/1114) | in review — all nine review points addressed, two `[OPEN]` decisions pending |
 | A2A test server (v0.3.0 surface, e2e target) | [Kuadrant#1200](https://github.com/Kuadrant/mcp-gateway/pull/1200) | draft, CI green — held for the v1.0 confirm, then migrates + goes ready |
 | Original PoC (federated card broker) | [Kuadrant#986](https://github.com/Kuadrant/mcp-gateway/pull/986) | closed — pre-pivot, superseded by the design |
-| Spike 1 — per-method response ModeOverride | [this fork, PR #1](../../pull/1) | **verified against real Envoy** — BUFFERED + STREAMED both honored mid-request ; surfaced the content-length constraint (recorded in the design doc) |
-| Implementation (CRD, controller, broker, router) | this fork, branch per piece | starts after spike 1, upstreams once proven |
+| Spike 1 — per-method response ModeOverride | [this fork, PR #1](../../pull/1) | **merged** — verified against real Envoy, BUFFERED + STREAMED both honored mid-request ; surfaced the content-length constraint (recorded in the design doc) |
+| CRD + controller (`A2AAgentRegistration`) | [this fork, PR #3](../../pull/3) | **merged** — 56/56 envtest specs, live-verified grant lifecycle on Kind, upstream CI fully green ; consent-gated cross-namespace with revocation withdrawal |
+| Broker card cache + catalog, router, task store | this fork, branch per piece | next up — Tasks 7/8 onward, upstreams once proven |
+| Stretch + mentor-gated backlog | [issues #5–#10](../../issues) | deferred scope, each with its why — three self-executable, three needing mentor decisions |
 
 ## The plan
 
@@ -151,7 +154,7 @@ gantt
     A2A test server (1200)                :done,   p1b, 2026-06-20, 2026-06-28
     section Phase 2 — build (fork)
     Spike ModeOverride                    :done,   p2a, 2026-07-01, 2026-07-02
-    CRD + controller                      :        p2b, 2026-07-08, 2026-07-21
+    CRD + controller                      :done,   p2b, 2026-07-02, 2026-07-05
     Broker card serving + catalog         :        p2c, 2026-07-15, 2026-07-28
     Router routing + task-ID mapping      :        p2d, 2026-07-22, 2026-08-04
     section Phase 3 — prove
@@ -163,7 +166,7 @@ gantt
 - [x] Design doc: ext_proc routing, federated card serving, session implications, CRD design
 - [x] Deterministic A2A test server for e2e
 - [x] Spike: mid-request response mode change (the one piece the review flagged as *"haven't seen it done before — good to derisk early"*) — verified, works ; one constraint found and recorded
-- [ ] `A2AAgentRegistration` CRD + controller (config fan-out per gateway namespace)
+- [x] `A2AAgentRegistration` CRD + controller (config fan-out per gateway namespace) — merged ahead of plan ; immutable identity fields, ReferenceGrant-gated cross-namespace, revocation withdraws config
 - [ ] Broker: card cache behind a pluggable interface, RFC 9727 catalog endpoint
 - [ ] Router: path-per-agent routing, gateway-owned task IDs, buffered + streamed rewrites
 - [ ] E2E: discovery, task execution, streaming, auth, MCP regression
@@ -216,6 +219,15 @@ Non-streaming methods (`message/send`, `tasks/get`) need the *whole* response bo
 <br>
 
 Card fetching (broker → agent, no client involved) uses the registration's `credentialRef`; a static credential the router can never see. Task invocation (a real client behind every call) forwards the *client's* identity — bearer pass-through or, recommended, RFC 8693 token exchange re-audienced to the agent via Authorino. Injecting the gateway's static credential into client calls would be the classic confused-deputy: the agent loses the caller's identity and a low-privilege client rides the gateway's credential. Same split MCP already enforces, for the same reason.
+
+</details>
+
+<details>
+<summary><b>6 : Cross-namespace registration needs the route namespace's consent</b></summary>
+
+<br>
+
+Being able to create a registration in namespace A is not permission to expose namespace B's agent through the gateway — that would let a tenant register another tenant's backend with no signal and no veto. So a cross-namespace `targetRef` requires a `ReferenceGrant` in the route's namespace (`from: A2AAgentRegistration`, `to: HTTPRoute`), the Gateway API's own consent primitive and the same model the extension controller already uses — a boundary the maintainers held firm on for the sibling MCP fix, adopted here from day one. The controller watches grants, so consent takes effect within a reconcile in both directions ; and crucially, revoking a grant *withdraws the agent's config*, not just the status — everywhere else config is last-known-good on failure (a transient error must never rip a live agent out of the data plane), but consent is an explicit state, and consent withdrawn means exposure withdrawn. Identity fields (`agentPrefix`, `targetRef`) are immutable by CEL for the same reason: retargeting a registration would strand the previous agent's config, so replacing an agent means replacing the registration.
 
 </details>
 
