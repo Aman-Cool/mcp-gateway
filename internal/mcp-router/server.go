@@ -79,6 +79,7 @@ func (s *ExtProcServer) Process(stream extProcV3.ExternalProcessor_ProcessServer
 		ctx                 = stream.Context()
 		rewriter            *sseRewriter // nil until a tool call response arrives
 		bodyBuffer          []byte
+		a2a                 *a2aState // non-nil for /a2a requests (spike)
 	)
 	span := trace.SpanFromContext(ctx)
 	defer func() { span.End() }()
@@ -129,6 +130,23 @@ func (s *ExtProcServer) Process(stream extProcV3.ExternalProcessor_ProcessServer
 					attribute.String("http.request_id", requestID),
 				),
 			)
+
+			// a2a spike: branch before any mcp header handling. no header
+			// mutation is needed; routing comes from the httproute path match.
+			if isA2APath(requestPath) {
+				a2a = &a2aState{}
+				span.SetAttributes(attribute.String("a2a.path", requestPath))
+				s.Logger.DebugContext(ctx, "a2a spike: request detected", "request id", requestID, "path", requestPath)
+				resp := responseBuilder.WithDoNothingResponse(true).Build()
+				for _, res := range resp {
+					if err := stream.Send(res); err != nil {
+						s.Logger.ErrorContext(ctx, "error sending response", "error", err)
+						recordError(span, err, 500)
+						return err //nolint:spancheck // ended via defer closure
+					}
+				}
+				continue
+			}
 
 			responses, _ := s.HandleRequestHeaders(ctx, r.RequestHeaders)
 			s.Logger.DebugContext(ctx, "[ext_proc ] Process: ProcessingRequest_RequestHeaders", "request id:", requestID, "path", requestPath, "method", method)
@@ -226,6 +244,36 @@ func (s *ExtProcServer) Process(stream extProcV3.ExternalProcessor_ProcessServer
 				}
 				continue
 			}
+			// a2a spike: parse only the json-rpc method; an a2a body must
+			// never enter MCPRequest.Validate().
+			if a2a != nil {
+				method, err := parseA2AMethod(bodyBuffer)
+				if err != nil {
+					s.Logger.ErrorContext(ctx, "a2a spike: invalid request body", "error", err)
+					recordError(span, err, 400)
+					resp := responseBuilder.WithImmediateResponse(400, "invalid a2a request body").Build()
+					for _, res := range resp {
+						if err := stream.Send(res); err != nil {
+							s.Logger.ErrorContext(ctx, "error sending response", "error", err)
+							return err
+						}
+					}
+					continue
+				}
+				a2a.method = method
+				a2a.streaming = isA2AStreamingMethod(method)
+				span.SetAttributes(attribute.String("a2a.method", method))
+				s.Logger.DebugContext(ctx, "a2a spike: request parsed", "request id", requestID, "method", method, "streaming", a2a.streaming)
+				resp := responseBuilder.WithDoNothingResponse(false).Build()
+				for _, res := range resp {
+					if err := stream.Send(res); err != nil {
+						s.Logger.ErrorContext(ctx, "error sending response", "error", err)
+						return err
+					}
+				}
+				continue
+			}
+
 			if err := json.Unmarshal(bodyBuffer, &mcpRequest); err != nil {
 				s.Logger.ErrorContext(ctx, "error unmarshalling request body", "error", err)
 				recordError(span, err, 400)
@@ -282,6 +330,39 @@ func (s *ExtProcServer) Process(stream extProcV3.ExternalProcessor_ProcessServer
 			statusCode := getSingleValueHeader(r.ResponseHeaders.Headers, ":status")
 			span.SetAttributes(attribute.String("http.status_code", statusCode))
 
+			// a2a spike: on 200 flip the response body mode per method
+			// (BUFFERED non-streaming, STREAMED sse) and keep the stream
+			// open for the body phase. this is the mid-request mode change
+			// being derisked. spike finding: the buffered rewrite changes
+			// the body length, so content-length must be dropped here at
+			// the headers phase — envoy fails closed on a length mismatch
+			// ("mismatch between content length and the length of the
+			// mutated body") since the header is committed before the body
+			// mutation arrives.
+			if a2a != nil {
+				var responses []*extProcV3.ProcessingResponse
+				if statusCode == "200" && !a2a.streaming {
+					responses = responseBuilder.WithResponseHeaderMutations(nil, "content-length").Build()
+				} else {
+					responses = responseBuilder.WithDoNothingResponseHeaderResponse().Build()
+				}
+				if statusCode == "200" {
+					responses[0].ModeOverride = a2aModeOverride(a2a.streaming)
+				}
+				for _, response := range responses {
+					if err := stream.Send(response); err != nil {
+						s.Logger.ErrorContext(ctx, "error sending response", "error", err)
+						recordError(span, err, 500)
+						return err
+					}
+				}
+				if statusCode != "200" {
+					return nil // no override set: no body phase follows
+				}
+				s.Logger.DebugContext(ctx, "a2a spike: mode override set", "request id", requestID, "method", a2a.method, "streaming", a2a.streaming)
+				continue
+			}
+
 			if mcpRequest != nil && mcpRequest.isToolCall() {
 				clientElicitation, elErr := s.SessionCache.GetClientElicitation(ctx, mcpRequest.GetSessionID())
 				if elErr != nil {
@@ -314,6 +395,18 @@ func (s *ExtProcServer) Process(stream extProcV3.ExternalProcessor_ProcessServer
 		case *extProcV3.ProcessingRequest_ResponseBody:
 			body := r.ResponseBody.GetBody()
 			endOfStream := r.ResponseBody.GetEndOfStream()
+
+			// a2a spike: buffered responses are rewritten whole; streamed
+			// sse chunks pass through untouched (sse rewrite is future work).
+			if a2a != nil && !a2a.streaming {
+				if endOfStream {
+					body = rewriteA2ABufferedTaskID(ctx, s.Logger, body)
+				} else {
+					// spike finding hook: BUFFERED mode is expected to deliver
+					// the whole body in one message; log if envoy chunks it.
+					s.Logger.InfoContext(ctx, "a2a spike: buffered response arrived chunked", "request id", requestID, "bytes", len(body))
+				}
+			}
 
 			if rewriter != nil {
 				body = rewriter.Process(ctx, body)
