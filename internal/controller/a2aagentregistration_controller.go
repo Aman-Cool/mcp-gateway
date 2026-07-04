@@ -6,7 +6,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -101,33 +100,33 @@ func (r *A2AReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 	if routeNamespace != a2areg.Namespace {
 		granted, err := r.hasValidReferenceGrantForRoute(ctx, a2areg, routeNamespace)
 		if err != nil {
-			return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+			return r.failStatus(ctx, a2areg, err.Error(), err)
 		}
 		if !granted {
 			// a grant is an explicit consent state, not a transient failure: withdraw any
 			// previously written config so revoking the grant actually revokes the exposure
 			if err := r.ConfigReaderWriter.RemoveA2AAgent(ctx, a2aAgentName(a2areg)); err != nil {
-				return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+				return r.failStatus(ctx, a2areg, err.Error(), err)
 			}
 			msg := fmt.Sprintf("cross-namespace targetRef requires a ReferenceGrant in namespace %s permitting A2AAgentRegistration to reference HTTPRoute", routeNamespace)
-			return r.failStatus(ctx, a2areg, conditionReasonNotReady, msg, nil)
+			return r.failStatus(ctx, a2areg, msg, nil)
 		}
 	}
 
 	// get the HTTPRoute this registration targets, honoring targetRef.namespace
 	targetRoute, err := r.getTargetHTTPRoute(ctx, a2areg)
 	if err != nil {
-		return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+		return r.failStatus(ctx, a2areg, err.Error(), err)
 	}
 
 	// find gateways that have accepted the httproute
 	validGateways, err := findValidGatewaysForHTTPRoute(ctx, r.Client, targetRoute)
 	if err != nil {
-		return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+		return r.failStatus(ctx, a2areg, err.Error(), err)
 	}
 	if len(validGateways) == 0 {
 		err := fmt.Errorf("no valid gateways for httproute")
-		return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+		return r.failStatus(ctx, a2areg, err.Error(), err)
 	}
 
 	// collect namespaces of valid MCPGatewayExtensions whose listener the route attaches to
@@ -135,7 +134,7 @@ func (r *A2AReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 	for _, vg := range validGateways {
 		mcpGatewayExtensions, err := r.MCPExtFinderValidator.FindValidMCPGatewayExtsForGateway(ctx, vg)
 		if err != nil {
-			return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+			return r.failStatus(ctx, a2areg, err.Error(), err)
 		}
 		for _, vext := range mcpGatewayExtensions {
 			if !httpRouteAttachesToListener(targetRoute, vg, vext) {
@@ -148,17 +147,17 @@ func (r *A2AReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 	}
 	if len(validNamespaces) == 0 {
 		// not an error: no extension is configured for this route yet
-		result, err := r.failStatus(ctx, a2areg, conditionReasonNotReady, "no matching mcpgatewayextensions for attached listener", nil)
+		result, err := r.failStatus(ctx, a2areg, "no matching mcpgatewayextensions for attached listener", nil)
 		return result, err
 	}
 
 	agentConfig, err := r.buildA2AAgentConfig(ctx, targetRoute, a2areg)
 	if err != nil {
-		return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+		return r.failStatus(ctx, a2areg, err.Error(), err)
 	}
 	for _, configNs := range validNamespaces {
 		if err := r.ConfigReaderWriter.UpsertA2AAgent(ctx, *agentConfig, config.NamespaceName(configNs)); err != nil {
-			return r.failStatus(ctx, a2areg, conditionReasonNotReady, err.Error(), err)
+			return r.failStatus(ctx, a2areg, err.Error(), err)
 		}
 	}
 
@@ -189,8 +188,8 @@ func (r *A2AReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 // mirroring MCPServerRegistration): a transient error must not rip a live agent out of the
 // data plane. Config is removed only on deletion and on ReferenceGrant revocation — consent
 // is an explicit state, not a transient failure.
-func (r *A2AReconciler) failStatus(ctx context.Context, a2areg *mcpv1alpha1.A2AAgentRegistration, reason, message string, reconcileErr error) (reconcile.Result, error) {
-	if err := r.updateStatus(ctx, a2areg, false, reason, message); err != nil {
+func (r *A2AReconciler) failStatus(ctx context.Context, a2areg *mcpv1alpha1.A2AAgentRegistration, message string, reconcileErr error) (reconcile.Result, error) {
+	if err := r.updateStatus(ctx, a2areg, false, conditionReasonNotReady, message); err != nil {
 		if apierrors.IsConflict(err) {
 			// don't log these as they are just noise
 			return ctrl.Result{RequeueAfter: defaultRequeueTime}, nil
@@ -300,28 +299,11 @@ func (r *A2AReconciler) buildA2AAgentConfig(ctx context.Context, targetRoute *ga
 	// add credential if configured: used by the broker for card discovery only,
 	// never injected into client message/send or tasks/* requests
 	if a2areg.Spec.CredentialRef != nil {
-		secret := &corev1.Secret{}
-		err := r.DirectAPIReader.Get(ctx, types.NamespacedName{
-			Name:      a2areg.Spec.CredentialRef.Name,
-			Namespace: a2areg.Namespace,
-		}, secret)
+		credential, err := readLabeledCredential(ctx, r.DirectAPIReader, a2areg.Namespace, a2areg.Spec.CredentialRef)
 		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("credential secret %s not found", a2areg.Spec.CredentialRef.Name)
-			}
-			return nil, fmt.Errorf("failed to get credential secret: %w", err)
+			return nil, err
 		}
-
-		if secret.Labels == nil || secret.Labels[ManagedSecretLabel] != ManagedSecretValue {
-			return nil, fmt.Errorf("credential secret %s is missing required label %s=%s",
-				a2areg.Spec.CredentialRef.Name, ManagedSecretLabel, ManagedSecretValue)
-		}
-
-		val, ok := secret.Data[a2areg.Spec.CredentialRef.Key]
-		if !ok {
-			return nil, fmt.Errorf("credential secret %s missing key %s", a2areg.Spec.CredentialRef.Name, a2areg.Spec.CredentialRef.Key)
-		}
-		agentConfig.Credential = string(val)
+		agentConfig.Credential = credential
 	}
 
 	return &agentConfig, nil
@@ -334,44 +316,11 @@ func (r *A2AReconciler) updateStatus(
 	reason string,
 	message string,
 ) error {
-	condition := metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: metav1.Now(),
-	}
-
-	if ready {
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = conditionReasonReady
-	}
-
-	statusChanged := false
-	found := false
-	for i, cond := range a2areg.Status.Conditions {
-		if cond.Type == condition.Type {
-			// only update LastTransitionTime if the STATUS actually changed (True->False or False->True)
-			if cond.Status == condition.Status {
-				condition.LastTransitionTime = cond.LastTransitionTime
-			}
-			if cond.Status != condition.Status || cond.Reason != condition.Reason || cond.Message != condition.Message {
-				statusChanged = true
-			}
-			a2areg.Status.Conditions[i] = condition
-			found = true
-			break
-		}
-	}
-	if !found {
-		a2areg.Status.Conditions = append(a2areg.Status.Conditions, condition)
-		statusChanged = true
-	}
-
-	if !statusChanged {
+	conditions, changed := applyReadyCondition(a2areg.Status.Conditions, ready, reason, message)
+	a2areg.Status.Conditions = conditions
+	if !changed {
 		return nil
 	}
-
 	return r.Status().Update(ctx, a2areg)
 }
 

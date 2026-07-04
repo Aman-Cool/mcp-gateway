@@ -114,7 +114,7 @@ func (mcpServer MCPServer) GetName() string {
 }
 
 // ID returns a unique id for the a registered server
-func (mcpServer *MCPServer) ID() UpstreamMCPID {
+func (mcpServer MCPServer) ID() UpstreamMCPID {
 	return UpstreamMCPID(fmt.Sprintf("%s:%s:%s", mcpServer.Name, mcpServer.Prefix, mcpServer.Hostname))
 }
 
@@ -178,7 +178,7 @@ func tokenURLElicitationChanged(a, b *TokenURLElicitationConfig) bool {
 }
 
 // Path returns the path part of the mcp url
-func (mcpServer *MCPServer) Path() (string, error) {
+func (mcpServer MCPServer) Path() (string, error) {
 	parsedURL, err := url.Parse(mcpServer.URL)
 	if err != nil {
 		return "", err

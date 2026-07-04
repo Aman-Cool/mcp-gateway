@@ -382,30 +382,11 @@ func (r *MCPReconciler) buildMCPServerConfig(ctx context.Context, targetRoute *g
 
 	// add credential env var if configured
 	if mcpsr.Spec.CredentialRef != nil {
-		secret := &corev1.Secret{}
-		err := r.DirectAPIReader.Get(ctx, types.NamespacedName{
-			Name:      mcpsr.Spec.CredentialRef.Name,
-			Namespace: mcpsr.Namespace,
-		}, secret)
+		credential, err := readLabeledCredential(ctx, r.DirectAPIReader, mcpsr.Namespace, mcpsr.Spec.CredentialRef)
 		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("credential secret %s not found", mcpsr.Spec.CredentialRef.Name)
-			}
-			return nil, fmt.Errorf("failed to get credential secret: %w", err)
+			return nil, err
 		}
-
-		// check for required label
-		if secret.Labels == nil || secret.Labels[ManagedSecretLabel] != ManagedSecretValue {
-			return nil, fmt.Errorf("credential secret %s is missing required label %s=%s",
-				mcpsr.Spec.CredentialRef.Name, ManagedSecretLabel, ManagedSecretValue)
-		}
-
-		val, ok := secret.Data[mcpsr.Spec.CredentialRef.Key]
-		if !ok {
-			return nil, fmt.Errorf("credential secret %s missing key %s", mcpsr.Spec.CredentialRef.Name, mcpsr.Spec.CredentialRef.Key)
-		}
-		serverConfig.Credential = string(val)
-
+		serverConfig.Credential = credential
 	}
 
 	if mcpsr.Spec.CACertSecretRef != nil {
@@ -615,44 +596,11 @@ func (r *MCPReconciler) updateStatus(
 	reason string,
 	message string,
 ) error {
-	condition := metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: metav1.Now(),
-	}
-
-	if ready {
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = conditionReasonReady
-	}
-
-	statusChanged := false
-	found := false
-	for i, cond := range mcpsr.Status.Conditions {
-		if cond.Type == condition.Type {
-			// only update LastTransitionTime if the STATUS actually changed (True->False or False->True)
-			if cond.Status == condition.Status {
-				condition.LastTransitionTime = cond.LastTransitionTime
-			}
-			if cond.Status != condition.Status || cond.Reason != condition.Reason || cond.Message != condition.Message {
-				statusChanged = true
-			}
-			mcpsr.Status.Conditions[i] = condition
-			found = true
-			break
-		}
-	}
-	if !found {
-		mcpsr.Status.Conditions = append(mcpsr.Status.Conditions, condition)
-		statusChanged = true
-	}
-
-	if !statusChanged {
+	conditions, changed := applyReadyCondition(mcpsr.Status.Conditions, ready, reason, message)
+	mcpsr.Status.Conditions = conditions
+	if !changed {
 		return nil
 	}
-
 	return r.Status().Update(ctx, mcpsr)
 }
 
