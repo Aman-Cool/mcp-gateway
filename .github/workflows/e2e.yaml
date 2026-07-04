@@ -54,7 +54,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          source=pull
+          # fork: test-server images (test-a2a-server) are not published to
+          # ghcr.io/kuadrant, so always build them in CI instead of pulling
+          source=build
           case "${{ github.event_name }}" in
             pull_request)
               # previous_filename covers renames out of the watched paths
