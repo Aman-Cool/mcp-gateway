@@ -16,7 +16,7 @@ type A2AAgent struct {
 // broker acts on. Used to skip config secret writes that would only trigger spurious
 // broker reloads. Auth is file-config only (never controller-written), so it is not compared,
 // mirroring MCPServer.ConfigChanged.
-func (agent *A2AAgent) ConfigChanged(existingConfig A2AAgent) bool {
+func (agent A2AAgent) ConfigChanged(existingConfig A2AAgent) bool {
 	return existingConfig.Name != agent.Name ||
 		existingConfig.URL != agent.URL ||
 		existingConfig.Hostname != agent.Hostname ||
@@ -24,4 +24,9 @@ func (agent *A2AAgent) ConfigChanged(existingConfig A2AAgent) bool {
 		existingConfig.Credential != agent.Credential ||
 		existingConfig.AgentCardURL != agent.AgentCardURL ||
 		normalizeState(existingConfig.State) != normalizeState(agent.State)
+}
+
+// GetName returns the agent name; part of the namedEntry contract shared with MCPServer.
+func (agent A2AAgent) GetName() string {
+	return agent.Name
 }

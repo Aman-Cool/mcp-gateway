@@ -152,202 +152,141 @@ func (srw *SecretReaderWriter) readOrCreateConfigSecret(ctx context.Context, nam
 	return existingConfig, configSecret, nil
 }
 
-// UpsertMCPServer updates or inserts a single MCPServer in the config secret.
-// If a server with the same Name already exists, it is replaced. Otherwise, the
-// server is appended to the list. This uses a read-modify-write pattern with
-// automatic retry on conflict errors.
-func (srw *SecretReaderWriter) UpsertMCPServer(ctx context.Context, server MCPServer, namespaceName types.NamespacedName) error {
-	srw.Logger.Info("SecretReaderWriter UpsertMCPServer", "secret", namespaceName, "name", server.Name)
+// namedEntry is the contract shared by config entries the writer manages by name:
+// MCPServer and A2AAgent. ConfigChanged gates the skip-unchanged-write discipline.
+type namedEntry[T any] interface {
+	GetName() string
+	ConfigChanged(existing T) bool
+}
+
+// upsertNamedEntry updates or inserts a single named entry in one config secret's
+// section. If an entry with the same name exists it is replaced (unless unchanged,
+// in which case the write is skipped to avoid spurious broker reloads). Uses a
+// read-modify-write pattern with automatic retry on conflict errors.
+func upsertNamedEntry[T namedEntry[T]](ctx context.Context, srw *SecretReaderWriter, kind string, entry T, namespaceName types.NamespacedName, get func(*BrokerConfig) []T, set func(*BrokerConfig, []T)) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		existingConfig, backingSecret, err := srw.readOrCreateConfigSecret(ctx, namespaceName)
 		if err != nil {
-			return fmt.Errorf("upsert mcpserver failed to read config secret: %w", err)
+			return fmt.Errorf("upsert %s failed to read config secret: %w", kind, err)
 		}
 
-		// find and replace existing server, or append if not found
+		// find and replace existing entry, or append if not found
+		entries := get(existingConfig)
 		found := false
-		for i, existing := range existingConfig.Servers {
-
-			if existing.Name == server.Name {
-				if !server.ConfigChanged(existing) {
+		for i := range entries {
+			if entries[i].GetName() == entry.GetName() {
+				if !entry.ConfigChanged(entries[i]) {
 					// config unchanged, skip write to avoid unnecessary secret updates
 					// that trigger broker config reloads
-					srw.Logger.Info("SecretReaderWriter UpsertMCPServer config unchanged, skipping write", "name", server.Name)
+					srw.Logger.Info("SecretReaderWriter upsert config unchanged, skipping write", "kind", kind, "name", entry.GetName())
 					return nil
 				}
-				existingConfig.Servers[i] = server
+				entries[i] = entry
 				found = true
 				break
 			}
 		}
 		if !found {
-			existingConfig.Servers = append(existingConfig.Servers, server)
+			entries = append(entries, entry)
 		}
+		set(existingConfig, entries)
 
 		updated, err := yaml.Marshal(existingConfig)
 		if err != nil {
-			return fmt.Errorf("upsert mcpserver failed to marshal config: %w", err)
+			return fmt.Errorf("upsert %s failed to marshal config: %w", kind, err)
 		}
-		srw.Logger.Info("SecretReaderWriter total servers now", "total", len(existingConfig.Servers))
+		srw.Logger.Info("SecretReaderWriter total entries now", "kind", kind, "total", len(entries))
 		backingSecret.StringData[configFileName] = string(updated)
 		return srw.Client.Update(ctx, backingSecret)
 	})
+}
+
+// removeNamedEntry removes a single named entry from its section in all config
+// secrets cluster-wide (every secret labeled "mcp.kuadrant.io/aggregated": "true").
+// Secrets that don't contain the entry are skipped; per-secret failures are logged
+// and the remaining secrets are still attempted.
+func removeNamedEntry[T namedEntry[T]](ctx context.Context, srw *SecretReaderWriter, kind, name string, get func(*BrokerConfig) []T, set func(*BrokerConfig, []T)) error {
+	secretList := &corev1.SecretList{}
+	if err := srw.Client.List(ctx, secretList, client.MatchingLabels{
+		"mcp.kuadrant.io/aggregated": "true",
+	}); err != nil {
+		return fmt.Errorf("remove %s failed to list config secrets: %w", kind, err)
+	}
+
+	var lastErr error
+	for _, secret := range secretList.Items {
+		namespaceName := types.NamespacedName{Namespace: secret.Namespace, Name: secret.Name}
+		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			existingConfig, backingSecret, err := srw.readOrCreateConfigSecret(ctx, namespaceName)
+			if err != nil {
+				return fmt.Errorf("remove %s failed to read config secret: %w", kind, err)
+			}
+
+			entries := get(existingConfig)
+			found := false
+			filtered := make([]T, 0, len(entries))
+			for i := range entries {
+				if entries[i].GetName() == name {
+					found = true
+				} else {
+					filtered = append(filtered, entries[i])
+				}
+			}
+
+			// skip update if the entry wasn't in this config
+			if !found {
+				return nil
+			}
+			set(existingConfig, filtered)
+
+			updated, err := yaml.Marshal(existingConfig)
+			if err != nil {
+				return fmt.Errorf("remove %s failed to marshal config: %w", kind, err)
+			}
+
+			backingSecret.StringData[configFileName] = string(updated)
+			return srw.Client.Update(ctx, backingSecret)
+		})
+		if err != nil {
+			lastErr = err
+			srw.Logger.Error("failed to remove entry from config secret",
+				"error", err, "kind", kind, "name", name, "namespace", secret.Namespace)
+		}
+	}
+
+	return lastErr
+}
+
+// UpsertMCPServer updates or inserts a single MCPServer in the config secret.
+func (srw *SecretReaderWriter) UpsertMCPServer(ctx context.Context, server MCPServer, namespaceName types.NamespacedName) error {
+	srw.Logger.Info("SecretReaderWriter UpsertMCPServer", "secret", namespaceName, "name", server.Name)
+	return upsertNamedEntry(ctx, srw, "mcpserver", server, namespaceName,
+		func(c *BrokerConfig) []MCPServer { return c.Servers },
+		func(c *BrokerConfig, s []MCPServer) { c.Servers = s })
 }
 
 // RemoveMCPServer removes a single MCPServer by name from all config secrets cluster-wide.
-// It finds all secrets with the "mcp.kuadrant.io/aggregated": "true" label and removes
-// the server from each. If the server doesn't exist in a secret, that secret is skipped.
-// This uses a read-modify-write pattern with automatic retry on conflict errors.
 func (srw *SecretReaderWriter) RemoveMCPServer(ctx context.Context, serverName string) error {
-	// list all aggregated config
 	srw.Logger.Info("SecretReaderWriter RemoveMCPServer")
-	secretList := &corev1.SecretList{}
-	if err := srw.Client.List(ctx, secretList, client.MatchingLabels{
-		"mcp.kuadrant.io/aggregated": "true",
-	}); err != nil {
-		return fmt.Errorf("remove mcpserver failed to list config secrets: %w", err)
-	}
-
-	var lastErr error
-	for _, secret := range secretList.Items {
-		namespaceName := types.NamespacedName{Namespace: secret.Namespace, Name: secret.Name}
-		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			existingConfig, backingSecret, err := srw.readOrCreateConfigSecret(ctx, namespaceName)
-			if err != nil {
-				return fmt.Errorf("remove mcpserver failed to read config secret: %w", err)
-			}
-
-			// check if server exists in this config
-			found := false
-			filtered := make([]MCPServer, 0, len(existingConfig.Servers))
-			for _, existing := range existingConfig.Servers {
-				if existing.Name == serverName {
-					found = true
-				} else {
-					filtered = append(filtered, existing)
-				}
-			}
-
-			// skip update if server wasn't in this config
-			if !found {
-				return nil
-			}
-
-			existingConfig.Servers = filtered
-			updated, err := yaml.Marshal(existingConfig)
-			if err != nil {
-				return fmt.Errorf("remove mcpserver failed to marshal config: %w", err)
-			}
-
-			backingSecret.StringData[configFileName] = string(updated)
-			return srw.Client.Update(ctx, backingSecret)
-		})
-		if err != nil {
-			lastErr = err
-			srw.Logger.Error("failed to remove server from config secret",
-				"error", err, "serverName", serverName, "namespace", secret.Namespace)
-		}
-	}
-
-	return lastErr
+	return removeNamedEntry(ctx, srw, "mcpserver", serverName,
+		func(c *BrokerConfig) []MCPServer { return c.Servers },
+		func(c *BrokerConfig, s []MCPServer) { c.Servers = s })
 }
 
 // UpsertA2AAgent updates or inserts a single A2AAgent in the config secret.
-// If an agent with the same Name already exists, it is replaced. Otherwise, the
-// agent is appended to the list. This uses a read-modify-write pattern with
-// automatic retry on conflict errors.
 func (srw *SecretReaderWriter) UpsertA2AAgent(ctx context.Context, agent A2AAgent, namespaceName types.NamespacedName) error {
 	srw.Logger.Info("SecretReaderWriter UpsertA2AAgent", "secret", namespaceName, "name", agent.Name)
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		existingConfig, backingSecret, err := srw.readOrCreateConfigSecret(ctx, namespaceName)
-		if err != nil {
-			return fmt.Errorf("upsert a2aagent failed to read config secret: %w", err)
-		}
-
-		// find and replace existing agent, or append if not found
-		found := false
-		for i, existing := range existingConfig.A2AAgents {
-			if existing.Name == agent.Name {
-				if !agent.ConfigChanged(existing) {
-					// config unchanged, skip write to avoid unnecessary secret updates
-					// that trigger broker config reloads
-					srw.Logger.Info("SecretReaderWriter UpsertA2AAgent config unchanged, skipping write", "name", agent.Name)
-					return nil
-				}
-				existingConfig.A2AAgents[i] = agent
-				found = true
-				break
-			}
-		}
-		if !found {
-			existingConfig.A2AAgents = append(existingConfig.A2AAgents, agent)
-		}
-
-		updated, err := yaml.Marshal(existingConfig)
-		if err != nil {
-			return fmt.Errorf("upsert a2aagent failed to marshal config: %w", err)
-		}
-		srw.Logger.Info("SecretReaderWriter total a2a agents now", "total", len(existingConfig.A2AAgents))
-		backingSecret.StringData[configFileName] = string(updated)
-		return srw.Client.Update(ctx, backingSecret)
-	})
+	return upsertNamedEntry(ctx, srw, "a2aagent", agent, namespaceName,
+		func(c *BrokerConfig) []A2AAgent { return c.A2AAgents },
+		func(c *BrokerConfig, a []A2AAgent) { c.A2AAgents = a })
 }
 
 // RemoveA2AAgent removes a single A2AAgent by name from all config secrets cluster-wide.
-// It finds all secrets with the "mcp.kuadrant.io/aggregated": "true" label and removes
-// the agent from each. If the agent doesn't exist in a secret, that secret is skipped.
-// This uses a read-modify-write pattern with automatic retry on conflict errors.
 func (srw *SecretReaderWriter) RemoveA2AAgent(ctx context.Context, agentName string) error {
 	srw.Logger.Info("SecretReaderWriter RemoveA2AAgent")
-	secretList := &corev1.SecretList{}
-	if err := srw.Client.List(ctx, secretList, client.MatchingLabels{
-		"mcp.kuadrant.io/aggregated": "true",
-	}); err != nil {
-		return fmt.Errorf("remove a2aagent failed to list config secrets: %w", err)
-	}
-
-	var lastErr error
-	for _, secret := range secretList.Items {
-		namespaceName := types.NamespacedName{Namespace: secret.Namespace, Name: secret.Name}
-		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			existingConfig, backingSecret, err := srw.readOrCreateConfigSecret(ctx, namespaceName)
-			if err != nil {
-				return fmt.Errorf("remove a2aagent failed to read config secret: %w", err)
-			}
-
-			// check if agent exists in this config
-			found := false
-			filtered := make([]A2AAgent, 0, len(existingConfig.A2AAgents))
-			for _, existing := range existingConfig.A2AAgents {
-				if existing.Name == agentName {
-					found = true
-				} else {
-					filtered = append(filtered, existing)
-				}
-			}
-
-			// skip update if agent wasn't in this config
-			if !found {
-				return nil
-			}
-
-			existingConfig.A2AAgents = filtered
-			updated, err := yaml.Marshal(existingConfig)
-			if err != nil {
-				return fmt.Errorf("remove a2aagent failed to marshal config: %w", err)
-			}
-
-			backingSecret.StringData[configFileName] = string(updated)
-			return srw.Client.Update(ctx, backingSecret)
-		})
-		if err != nil {
-			lastErr = err
-			srw.Logger.Error("failed to remove a2a agent from config secret",
-				"error", err, "agentName", agentName, "namespace", secret.Namespace)
-		}
-	}
-
-	return lastErr
+	return removeNamedEntry(ctx, srw, "a2aagent", agentName,
+		func(c *BrokerConfig) []A2AAgent { return c.A2AAgents },
+		func(c *BrokerConfig, a []A2AAgent) { c.A2AAgents = a })
 }
 
 // DeleteConfig deletes the entire config secret. If the secret doesn't exist,
