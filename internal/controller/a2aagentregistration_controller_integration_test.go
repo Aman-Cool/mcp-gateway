@@ -617,4 +617,3 @@ func createTestA2AReferenceGrant(name, namespace, fromNamespace string) *gateway
 		},
 	}
 }
-
