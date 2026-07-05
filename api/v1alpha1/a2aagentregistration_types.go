@@ -38,8 +38,9 @@ type A2AAgentRegistrationSpec struct {
 	// The referenced HTTPRoute should have a backend service that implements the A2A protocol.
 	// The controller will discover the backend service from this HTTPRoute and configure
 	// the broker to serve the agent's card and route requests to it.
-	// Immutable once set: retargeting a registration would leave the previous agent's
-	// config behind, so replacing an agent means replacing the registration.
+	// Immutable once set: a retarget across gateways would strand config in namespaces the
+	// new target no longer fans out to, so replacing an agent means replacing the registration.
+	// Blue/green swaps happen at the HTTPRoute's backendRef, which the controller watches.
 	// +required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="targetRef is immutable once set"
 	TargetRef TargetReference `json:"targetRef,omitzero"`
