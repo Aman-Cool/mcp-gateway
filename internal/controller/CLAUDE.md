@@ -120,7 +120,7 @@ spec:
 ```
 
 Key behaviors:
-- `agentPrefix` and `targetRef` are immutable (CEL rules) — replacing an agent means replacing the registration
+- `agentPrefix` and `targetRef` are immutable (CEL rules) — replacing an agent means replacing the registration; blue/green swaps happen at the HTTPRoute backendRef, which the controller watches
 - Cross-namespace `targetRef` requires a `ReferenceGrant` in the route's namespace (`from`: `A2AAgentRegistration`, `to`: `HTTPRoute`); without one the registration is `Ready=False` and no config is written. Revoking the grant withdraws the agent's config (a `ReferenceGrant` watch triggers the reconcile)
 - Credential secrets need the `mcp.kuadrant.io/secret=true` label, same as `MCPServerRegistration`
 - `Ready` means config was written, not that the agent is reachable; no discovered card content appears in status
