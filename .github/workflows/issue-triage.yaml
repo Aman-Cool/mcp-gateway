@@ -100,6 +100,14 @@ jobs:
             }
 
 
+            // Rule: Issue closed -> remove triage/needs-triage
+            if (action === 'closed') {
+              if (currentLabels.includes('triage/needs-triage')) {
+                labelsToRemove.push('triage/needs-triage');
+                console.log('Issue closed -> removing triage/needs-triage');
+              }
+            }
+
             // Rule: Milestone-based triage
             // Skip milestone-based triage rules for closed events to avoid label mutation.
             if (action !== 'closed') {
