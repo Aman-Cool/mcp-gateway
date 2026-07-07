@@ -11,9 +11,8 @@ import (
 	"github.com/Kuadrant/mcp-gateway/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 )
-
-func boolPtr(v bool) *bool { return &v }
 
 // mark3labs-shaped upstream bytes: all four hints are *bool, absent keys
 // stay absent and explicit false survives.
@@ -34,14 +33,14 @@ func requireHarvest(t *testing.T, hints map[string]ToolHints) {
 	require.Nil(t, hints["empty_ann"].ReadOnlyHint)
 	require.JSONEq(t, `{}`, string(hints["empty_ann"].Raw))
 
-	require.Equal(t, boolPtr(true), hints["mixed"].ReadOnlyHint)
-	require.Equal(t, boolPtr(false), hints["mixed"].DestructiveHint)
+	require.Equal(t, ptr.To(true), hints["mixed"].ReadOnlyHint)
+	require.Equal(t, ptr.To(false), hints["mixed"].DestructiveHint)
 	require.Nil(t, hints["mixed"].IdempotentHint)
 	require.Nil(t, hints["mixed"].OpenWorldHint)
 	require.Equal(t, `{"readOnlyHint":true,"destructiveHint":false}`, string(hints["mixed"].Raw))
 
-	require.Equal(t, boolPtr(false), hints["explicit_false"].ReadOnlyHint)
-	require.Equal(t, boolPtr(false), hints["explicit_false"].IdempotentHint)
+	require.Equal(t, ptr.To(false), hints["explicit_false"].ReadOnlyHint)
+	require.Equal(t, ptr.To(false), hints["explicit_false"].IdempotentHint)
 	require.Nil(t, hints["explicit_false"].DestructiveHint)
 }
 
@@ -91,7 +90,7 @@ func TestToolHintsTee_EndToEnd(t *testing.T) {
 			srv.AddTool(&mcp.Tool{
 				Name:        "annotated",
 				InputSchema: map[string]any{"type": "object"},
-				Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: boolPtr(false)},
+				Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: ptr.To(false)},
 			}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 				return &mcp.CallToolResult{}, nil
 			})
@@ -117,8 +116,8 @@ func TestToolHintsTee_EndToEnd(t *testing.T) {
 			}, 5*time.Second, 10*time.Millisecond, "tee must harvest hints keyed by served name")
 
 			hints, _ := up.GetToolHints("up_annotated")
-			require.Equal(t, boolPtr(true), hints.ReadOnlyHint, fmt.Sprintf("%#v", hints))
-			require.Equal(t, boolPtr(false), hints.DestructiveHint)
+			require.Equal(t, ptr.To(true), hints.ReadOnlyHint, fmt.Sprintf("%#v", hints))
+			require.Equal(t, ptr.To(false), hints.DestructiveHint)
 			require.NotEmpty(t, hints.Raw)
 
 			_, ok := up.GetToolHints("annotated")
