@@ -617,9 +617,12 @@ spec:
 **Filter ordering.** ext_proc runs before Authorino (the EnvoyFilter inserts ext_proc `INSERT_FIRST`),
 so the router sets `x-a2a-agent` at the `RequestHeaders` phase — from the immutable `:path`, before the
 body is read — and Authorino reads it for the per-agent decision (the same ordering MCP relies on for
-`x-mcp-toolname`, see `docs/design/security-architecture.md`). `x-a2a-agent` is router-derived and
-stripped from client input (HTTPRoute `RequestHeaderModifier` + `internalOnlyHeaders`), so a client
-cannot forge it to reach an unauthorized agent. Token exchange (RFC 8693) is available identically to
+`x-mcp-toolname`, see `docs/design/security-architecture.md`). `x-a2a-agent` carries the
+**namespace-qualified** agent identity (`{namespace}/{prefix}`, derived from the `/a2a/{namespace}/{prefix}`
+path), so the authorization role above is namespace-scoped (`agent:{namespace}/{prefix}`) — two agents
+sharing a `prefix` across namespaces map to distinct roles, matching the collision-free routing. It is
+router-derived and stripped from client input (HTTPRoute `RequestHeaderModifier` + `internalOnlyHeaders`),
+so a client cannot forge it to reach an unauthorized agent. Token exchange (RFC 8693) is available identically to
 MCP. Per-agent policies can also attach to each agent's own HTTPRoute (`targetRef`), enforced on the
 `:authority`-rewritten second hop — mirroring MCP's per-server AuthPolicy.
 

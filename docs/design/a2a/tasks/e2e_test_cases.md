@@ -98,9 +98,9 @@ the `:path` prefix, not on the injected header.
 ### [A2ASecurity] AuthPolicy denies a client lacking the agent role
 
 When an AuthPolicy with per-agent RBAC is attached to the `/a2a` route and a client presents a valid
-bearer whose `resource_access['a2a'].roles` does not include `agent:{prefix}`, Authorino should return
-403 (using the router-set `x-a2a-agent` header) before the request reaches the upstream agent. A client
-whose token includes the role is routed normally.
+bearer whose `resource_access['a2a'].roles` does not include `agent:{namespace}/{prefix}`, Authorino
+should return 403 (using the router-set, namespace-qualified `x-a2a-agent` header) before the request
+reaches the upstream agent. A client whose token includes the role is routed normally.
 
 ---
 

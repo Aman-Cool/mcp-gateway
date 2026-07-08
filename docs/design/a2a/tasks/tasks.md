@@ -13,7 +13,7 @@ The following primitives exist in the codebase and are reused directly by the A2
 | idmap.Map | `internal/idmap/map.go` | Template for TaskStore (same in-memory/Redis duality) |
 | session.Cache | `internal/session/cache.go` | Extended with TaskStore methods |
 | JWTManager.Validate() | `internal/session/jwt.go` | Session validation for A2A requests |
-| JWTManager.GetExpiresIn() | `internal/session/jwt.go` | TTL source for task store Redis keys |
+| idmap Redis TTL pattern | `internal/idmap/redis.go` | Fixed safety-net TTL + explicit cleanup; the A2A task-store TTL is decoupled from JWT/session expiry, not derived from it |
 | config.Observer | `internal/config/types.go` | A2A broker registers as observer |
 | MCPServersConfig.Notify() | `internal/config/types.go` | Triggers A2A broker config updates |
 | SecretReaderWriter | `internal/config/config_writer.go` | Extended with UpsertA2AAgent/RemoveA2AAgent |
