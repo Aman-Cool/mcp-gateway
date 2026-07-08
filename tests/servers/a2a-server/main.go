@@ -1,20 +1,27 @@
 // a2a-test-server is an A2A protocol test server used by e2e tests.
-// It serves an Agent Card at the v0.3.0 well-known path (plus the legacy
-// alias) and handles message/send, message/stream, tasks/get, tasks/cancel
-// and tasks/resubscribe as JSON-RPC 2.0 over HTTP, with SSE streaming support.
+// It serves an Agent Card at the well-known path and handles the v1.0
+// JSON-RPC methods SendMessage, SendStreamingMessage, GetTask, CancelTask
+// and SubscribeToTask as JSON-RPC 2.0 over HTTP, with SSE streaming support.
+//
+// The wire format follows the A2A v1.0 JSON-RPC binding (ProtoJSON): enum
+// values are SCREAMING_SNAKE (TASK_STATE_*, ROLE_*), Parts are a flat oneof
+// (text / raw / data) with no kind discriminator, streaming results are wrapped
+// in a StreamResponse oneof (task / statusUpdate / artifactUpdate) and a
+// non-streaming SendMessage result is wrapped in a SendMessageResponse oneof
+// (task / message), while GetTask and CancelTask return a bare Task.
 //
 // Behaviour is driven by the incoming message text:
-//   - text containing "slow" starts the task in "working" state and
+//   - text containing "slow" starts the task in TASK_STATE_WORKING and
 //     completes it after TASK_DURATION_MS
-//   - text containing "fail" returns a task in "failed" state
-//   - anything else returns a "completed" task immediately
+//   - text containing "fail" returns a task in TASK_STATE_FAILED
+//   - anything else returns a TASK_STATE_COMPLETED task immediately
 //
 // Every completed task carries an "echo" artifact with the message text
 // and a "request-info" artifact with the received HTTP headers so tests
 // can assert on what the server actually saw. Text containing "large" (or
-// "image") additionally attaches a FilePart artifact with a deterministic
-// base64 payload of ARTIFACT_BYTES bytes (default 1 MiB); on message/stream
-// it is delivered as chunked artifact-update events (append/lastChunk) so the
+// "image") additionally attaches a file artifact with a deterministic
+// base64 payload of ARTIFACT_BYTES bytes (default 1 MiB); on streaming
+// it is delivered as chunked artifactUpdate events (append/lastChunk) so the
 // gateway's SSE passthrough is exercised on a heavy multi-modal payload it must
 // forward without decoding.
 //
@@ -40,28 +47,35 @@ import (
 )
 
 const (
-	stateSubmitted = "submitted"
-	stateWorking   = "working"
-	stateCompleted = "completed"
-	stateFailed    = "failed"
-	stateCanceled  = "canceled"
+	stateSubmitted = "TASK_STATE_SUBMITTED"
+	stateWorking   = "TASK_STATE_WORKING"
+	stateCompleted = "TASK_STATE_COMPLETED"
+	stateFailed    = "TASK_STATE_FAILED"
+	stateCanceled  = "TASK_STATE_CANCELED"
 )
 
-// a2a protocol types, subset of the v0.3.0 spec
+// a2a protocol types, subset of the v1.0 spec (JSON-RPC binding / ProtoJSON)
 
 type agentCard struct {
-	ProtocolVersion    string                    `json:"protocolVersion"`
-	Name               string                    `json:"name"`
-	Description        string                    `json:"description"`
-	URL                string                    `json:"url"`
-	PreferredTransport string                    `json:"preferredTransport"`
-	Version            string                    `json:"version"`
-	Capabilities       agentCapabilities         `json:"capabilities"`
-	DefaultInputModes  []string                  `json:"defaultInputModes"`
-	DefaultOutputModes []string                  `json:"defaultOutputModes"`
-	Skills             []agentSkill              `json:"skills"`
-	Security           []map[string][]string     `json:"security,omitempty"`
-	SecuritySchemes    map[string]securityScheme `json:"securitySchemes,omitempty"`
+	Name                 string                    `json:"name"`
+	Description          string                    `json:"description"`
+	SupportedInterfaces  []agentInterface          `json:"supportedInterfaces"`
+	Version              string                    `json:"version"`
+	Capabilities         agentCapabilities         `json:"capabilities"`
+	DefaultInputModes    []string                  `json:"defaultInputModes"`
+	DefaultOutputModes   []string                  `json:"defaultOutputModes"`
+	Skills               []agentSkill              `json:"skills"`
+	SecuritySchemes      map[string]securityScheme `json:"securitySchemes,omitempty"`
+	SecurityRequirements []securityRequirement     `json:"securityRequirements,omitempty"`
+}
+
+// agentInterface declares a target URL, transport and protocol version; v1.0
+// moved the endpoint off the top-level card `url` into this repeated field.
+type agentInterface struct {
+	URL             string `json:"url"`
+	ProtocolBinding string `json:"protocolBinding"`
+	Tenant          string `json:"tenant,omitempty"`
+	ProtocolVersion string `json:"protocolVersion"`
 }
 
 type agentCapabilities struct {
@@ -75,41 +89,55 @@ type agentSkill struct {
 	Tags        []string `json:"tags"`
 }
 
+// securityScheme is the v1.0 wrapped oneof; only one member is set.
 type securityScheme struct {
-	Type  string      `json:"type"`           // "apiKey" | "oauth2"
-	In    string      `json:"in,omitempty"`   // apiKey: "header"
-	Name  string      `json:"name,omitempty"` // apiKey: header name
-	Flows *oauthFlows `json:"flows,omitempty"`
+	APIKey *apiKeyScheme `json:"apiKeySecurityScheme,omitempty"`
+	OAuth2 *oauth2Scheme `json:"oauth2SecurityScheme,omitempty"`
+}
+
+type apiKeyScheme struct {
+	Location string `json:"location"` // "header" | "query" | "cookie"
+	Name     string `json:"name"`
+}
+
+type oauth2Scheme struct {
+	Flows oauthFlows `json:"flows"`
 }
 
 type oauthFlows struct {
-	ClientCredentials *oauthFlow `json:"clientCredentials,omitempty"`
+	ClientCredentials *clientCredentialsFlow `json:"clientCredentials,omitempty"`
 }
 
-type oauthFlow struct {
+type clientCredentialsFlow struct {
 	TokenURL string            `json:"tokenUrl,omitempty"`
 	Scopes   map[string]string `json:"scopes,omitempty"`
 }
 
-type part struct {
-	Kind string         `json:"kind"`
-	Text string         `json:"text,omitempty"`
-	Data map[string]any `json:"data,omitempty"`
-	File *fileContent   `json:"file,omitempty"`
+// securityRequirement maps a scheme name to its required scopes (StringList).
+type securityRequirement struct {
+	Schemes map[string]stringList `json:"schemes"`
 }
 
-type fileContent struct {
-	Name     string `json:"name,omitempty"`
-	MimeType string `json:"mimeType,omitempty"`
-	Bytes    string `json:"bytes,omitempty"` // base64-encoded
+type stringList struct {
+	List []string `json:"list"`
+}
+
+// part is the v1.0 flat oneof: exactly one of text/raw/data is set, with the
+// file metadata (filename/mediaType) alongside raw. There is no kind field.
+type part struct {
+	Text      string         `json:"text,omitempty"`
+	Raw       string         `json:"raw,omitempty"` // base64-encoded file bytes
+	Data      map[string]any `json:"data,omitempty"`
+	Filename  string         `json:"filename,omitempty"`
+	MediaType string         `json:"mediaType,omitempty"`
 }
 
 type message struct {
+	MessageID string `json:"messageId"`
+	ContextID string `json:"contextId,omitempty"`
+	TaskID    string `json:"taskId,omitempty"`
 	Role      string `json:"role"`
 	Parts     []part `json:"parts"`
-	MessageID string `json:"messageId"`
-	TaskID    string `json:"taskId,omitempty"`
-	ContextID string `json:"contextId,omitempty"`
 }
 
 type taskStatus struct {
@@ -129,16 +157,15 @@ type task struct {
 	Status    taskStatus `json:"status"`
 	Artifacts []artifact `json:"artifacts,omitempty"`
 	History   []message  `json:"history,omitempty"`
-	Kind      string     `json:"kind"`
 	createdAt time.Time  `json:"-"`
 }
 
+// v1.0 dropped the kind discriminator and the status-update `final` flag; the
+// stream terminates when the status carries a terminal TaskState.
 type statusUpdateEvent struct {
 	TaskID    string     `json:"taskId"`
 	ContextID string     `json:"contextId"`
 	Status    taskStatus `json:"status"`
-	Final     bool       `json:"final"`
-	Kind      string     `json:"kind"`
 }
 
 type artifactUpdateEvent struct {
@@ -147,7 +174,19 @@ type artifactUpdateEvent struct {
 	Artifact  artifact `json:"artifact"`
 	Append    bool     `json:"append"`
 	LastChunk bool     `json:"lastChunk"`
-	Kind      string   `json:"kind"`
+}
+
+// sendResult is the SendMessageResponse oneof (non-streaming SendMessage).
+type sendResult struct {
+	Task    *task    `json:"task,omitempty"`
+	Message *message `json:"message,omitempty"`
+}
+
+// streamResult is the StreamResponse oneof (SendStreamingMessage / SubscribeToTask).
+type streamResult struct {
+	Task           *task                `json:"task,omitempty"`
+	StatusUpdate   *statusUpdateEvent   `json:"statusUpdate,omitempty"`
+	ArtifactUpdate *artifactUpdateEvent `json:"artifactUpdate,omitempty"`
 }
 
 // json-rpc envelope
@@ -265,11 +304,13 @@ func buildCard() agentCard {
 		})
 	}
 	card := agentCard{
-		ProtocolVersion:    "0.3.0",
-		Name:               envDefault("AGENT_NAME", "a2a-test-agent"),
-		Description:        envDefault("AGENT_DESCRIPTION", "A2A test agent for e2e tests"),
-		URL:                envDefault("AGENT_URL", "http://localhost:9090/a2a"),
-		PreferredTransport: "JSONRPC",
+		Name:        envDefault("AGENT_NAME", "a2a-test-agent"),
+		Description: envDefault("AGENT_DESCRIPTION", "A2A test agent for e2e tests"),
+		SupportedInterfaces: []agentInterface{{
+			URL:             envDefault("AGENT_URL", "http://localhost:9090/a2a"),
+			ProtocolBinding: "JSONRPC",
+			ProtocolVersion: "1.0",
+		}},
 		Version:            "1.0.0",
 		Capabilities:       agentCapabilities{Streaming: true},
 		DefaultInputModes:  []string{"text/plain"},
@@ -282,17 +323,21 @@ func buildCard() agentCard {
 	switch authMode() {
 	case "apikey":
 		card.SecuritySchemes = map[string]securityScheme{
-			"apiKey": {Type: "apiKey", In: "header", Name: "X-API-Key"},
+			"apiKey": {APIKey: &apiKeyScheme{Location: "header", Name: "X-API-Key"}},
 		}
-		card.Security = []map[string][]string{{"apiKey": {}}}
+		card.SecurityRequirements = []securityRequirement{
+			{Schemes: map[string]stringList{"apiKey": {List: []string{}}}},
+		}
 	case "bearer", "oauth2":
 		card.SecuritySchemes = map[string]securityScheme{
-			"oauth2": {Type: "oauth2", Flows: &oauthFlows{ClientCredentials: &oauthFlow{
+			"oauth2": {OAuth2: &oauth2Scheme{Flows: oauthFlows{ClientCredentials: &clientCredentialsFlow{
 				TokenURL: envDefault("OAUTH_TOKEN_URL", "https://issuer.example.com/token"),
 				Scopes:   map[string]string{"a2a": "invoke A2A tasks"},
-			}}},
+			}}}},
 		}
-		card.Security = []map[string][]string{{"oauth2": {"a2a"}}}
+		card.SecurityRequirements = []securityRequirement{
+			{Schemes: map[string]stringList{"oauth2": {List: []string{"a2a"}}}},
+		}
 	}
 	return card
 }
@@ -300,7 +345,7 @@ func buildCard() agentCard {
 func messageText(m message) string {
 	var sb strings.Builder
 	for _, p := range m.Parts {
-		if p.Kind == "text" {
+		if p.Text != "" {
 			sb.WriteString(p.Text)
 		}
 	}
@@ -391,15 +436,15 @@ func (s *server) handleA2A(w http.ResponseWriter, r *http.Request) {
 	log.Printf("a2a request method=%s id=%v", req.Method, req.ID)
 
 	switch req.Method {
-	case "message/send":
+	case "SendMessage":
 		s.handleSend(w, r, req)
-	case "message/stream":
+	case "SendStreamingMessage":
 		s.handleStream(w, r, req)
-	case "tasks/get":
+	case "GetTask":
 		s.handleGet(w, req)
-	case "tasks/cancel":
+	case "CancelTask":
 		s.handleCancel(w, req)
-	case "tasks/resubscribe":
+	case "SubscribeToTask":
 		s.handleResubscribe(w, req)
 	default:
 		writeRPCError(w, req.ID, -32601, "method not found")
@@ -428,12 +473,13 @@ func (s *server) handleSend(w http.ResponseWriter, r *http.Request, req rpcReque
 			writeRPCError(w, req.ID, -32001, "task not found")
 			return
 		}
-		writeRPC(w, http.StatusOK, rpcResponse{ID: req.ID, Result: snap})
+		writeRPC(w, http.StatusOK, rpcResponse{ID: req.ID, Result: sendResult{Task: &snap}})
 		return
 	}
 
 	t := s.createTask(r, params.Message)
-	writeRPC(w, http.StatusOK, rpcResponse{ID: req.ID, Result: s.snapshot(t)})
+	snap := s.snapshot(t)
+	writeRPC(w, http.StatusOK, rpcResponse{ID: req.ID, Result: sendResult{Task: &snap}})
 }
 
 func (s *server) createTask(r *http.Request, msg message) *task {
@@ -442,7 +488,6 @@ func (s *server) createTask(r *http.Request, msg message) *task {
 		ID:        newID("a2a-task-"),
 		ContextID: newID("a2a-ctx-"),
 		Status:    taskStatus{State: stateCompleted, Timestamp: now()},
-		Kind:      "task",
 		createdAt: time.Now(),
 	}
 	msg.TaskID = t.ID
@@ -476,15 +521,15 @@ func (s *server) buildArtifacts(taskID, text string, r *http.Request) []artifact
 		{
 			ArtifactID: newID("a2a-artifact-"),
 			Name:       "echo",
-			Parts:      []part{{Kind: "text", Text: "echo: " + text}},
+			Parts:      []part{{Text: "echo: " + text}},
 		},
 		{
 			ArtifactID: newID("a2a-artifact-"),
 			Name:       "request-info",
-			Parts:      []part{{Kind: "data", Data: info}},
+			Parts:      []part{{Data: info}},
 		},
 	}
-	// heavy multi-modal payload as a single large FilePart, so the non-streaming
+	// heavy multi-modal payload as a single large file part, so the non-streaming
 	// (buffered) rewrite path is exercised on a big base64 blob.
 	if wantsFile(text) {
 		arts = append(arts, fileArtifact(deterministicB64(fileArtifactBytes())))
@@ -496,7 +541,7 @@ func wantsFile(text string) bool {
 	return strings.Contains(text, "large") || strings.Contains(text, "image")
 }
 
-// fileArtifactBytes is the decoded size of the FilePart payload, configurable
+// fileArtifactBytes is the decoded size of the file part payload, configurable
 // via ARTIFACT_BYTES (default 1 MiB). Size it past a naive buffer limit so a
 // passthrough that streams survives where one that buffers/decodes would not.
 func fileArtifactBytes() int {
@@ -524,8 +569,9 @@ func fileArtifact(b64 string) artifact {
 		ArtifactID: newID("a2a-artifact-"),
 		Name:       "payload",
 		Parts: []part{{
-			Kind: "file",
-			File: &fileContent{Name: "payload.bin", MimeType: "application/octet-stream", Bytes: b64},
+			Raw:       b64,
+			Filename:  "payload.bin",
+			MediaType: "application/octet-stream",
 		}},
 	}
 }
@@ -560,7 +606,6 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, req rpcReq
 		ID:        newID("a2a-task-"),
 		ContextID: newID("a2a-ctx-"),
 		Status:    taskStatus{State: stateSubmitted, Timestamp: now()},
-		Kind:      "task",
 		createdAt: time.Now(),
 	}
 	params.Message.TaskID = t.ID
@@ -574,7 +619,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, req rpcReq
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
-	send := func(result any) {
+	send := func(result streamResult) {
 		data, err := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
 		if err != nil {
 			log.Printf("failed to marshal sse event: %v", err)
@@ -588,17 +633,17 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, req rpcReq
 	// updates and a terminal state. the keepalive (a non-data: line) must pass
 	// through the gateway's data:-only rewriter untouched without being parsed
 	// as JSON.
-	send(s.snapshot(t))
+	snap := s.snapshot(t)
+	send(streamResult{Task: &snap})
 	fmt.Fprint(w, ": ping\n\n")
 	flusher.Flush()
 	for i := 0; i < 3; i++ {
 		time.Sleep(s.streamDelay)
-		send(statusUpdateEvent{
+		send(streamResult{StatusUpdate: &statusUpdateEvent{
 			TaskID:    t.ID,
 			ContextID: t.ContextID,
 			Status:    taskStatus{State: stateWorking, Timestamp: now()},
-			Kind:      "status-update",
-		})
+		}})
 	}
 	time.Sleep(s.streamDelay)
 
@@ -613,7 +658,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, req rpcReq
 	}
 	s.mu.Unlock()
 
-	// stream the heavy FilePart as chunked artifact-update events so the gateway
+	// stream the heavy file part as chunked artifactUpdate events so the gateway
 	// rewrites the task ID in each event envelope while the base64 passes through
 	// untouched (chunks split mid-base64 on purpose: a decoder would choke, a
 	// passthrough won't).
@@ -621,16 +666,16 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request, req rpcReq
 		streamFileArtifact(send, t, deterministicB64(fileArtifactBytes()))
 	}
 
-	send(statusUpdateEvent{
+	// terminal event: v1.0 has no `final` flag, the terminal TaskState is the
+	// signal, after which the server closes the stream.
+	send(streamResult{StatusUpdate: &statusUpdateEvent{
 		TaskID:    t.ID,
 		ContextID: t.ContextID,
 		Status:    taskStatus{State: final, Timestamp: now()},
-		Final:     true,
-		Kind:      "status-update",
-	})
+	}})
 }
 
-func streamFileArtifact(send func(any), t *task, b64 string) {
+func streamFileArtifact(send func(streamResult), t *task, b64 string) {
 	const chunks = 3
 	artID := newID("a2a-artifact-")
 	size := (len(b64) + chunks - 1) / chunks
@@ -640,21 +685,21 @@ func streamFileArtifact(send func(any), t *task, b64 string) {
 		if end > len(b64) {
 			end = len(b64)
 		}
-		send(artifactUpdateEvent{
+		send(streamResult{ArtifactUpdate: &artifactUpdateEvent{
 			TaskID:    t.ID,
 			ContextID: t.ContextID,
 			Artifact: artifact{
 				ArtifactID: artID,
 				Name:       "payload",
 				Parts: []part{{
-					Kind: "file",
-					File: &fileContent{Name: "payload.bin", MimeType: "application/octet-stream", Bytes: b64[start:end]},
+					Raw:       b64[start:end],
+					Filename:  "payload.bin",
+					MediaType: "application/octet-stream",
 				}},
 			},
 			Append:    i > 0,
 			LastChunk: i == chunks-1,
-			Kind:      "artifact-update",
-		})
+		}})
 	}
 }
 
@@ -681,7 +726,7 @@ func (s *server) handleResubscribe(w http.ResponseWriter, req rpcRequest) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
-	send := func(result any) {
+	send := func(result streamResult) {
 		data, err := json.Marshal(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: result})
 		if err != nil {
 			log.Printf("failed to marshal sse event: %v", err)
@@ -691,13 +736,13 @@ func (s *server) handleResubscribe(w http.ResponseWriter, req rpcRequest) {
 		flusher.Flush()
 	}
 
-	// reconnect: replay the current task state, then observe the task to its
-	// terminal state (driven by completeLater) and replay the final event.
-	// tasks/resubscribe is a streaming method, so even an already-terminal task
-	// gets an SSE final event rather than a buffered response. resubscribe only
-	// observes — it never mutates the task — so it cannot suppress the artifacts
-	// completeLater attaches; the poll is bounded so it cannot hang.
-	send(s.snapshot(t))
+	// reconnect: SubscribeToTask MUST return the Task as the first event, then
+	// observe the task to its terminal state (driven by completeLater) and replay
+	// the final event. even an already-terminal task gets an SSE terminal event.
+	// resubscribe only observes — it never mutates the task — so it cannot suppress
+	// the artifacts completeLater attaches; the poll is bounded so it cannot hang.
+	snap := s.snapshot(t)
+	send(streamResult{Task: &snap})
 	var state string
 	for i := 0; i < 30; i++ {
 		s.mu.Lock()
@@ -707,23 +752,20 @@ func (s *server) handleResubscribe(w http.ResponseWriter, req rpcRequest) {
 			break
 		}
 		time.Sleep(s.streamDelay)
-		send(statusUpdateEvent{
+		send(streamResult{StatusUpdate: &statusUpdateEvent{
 			TaskID:    t.ID,
 			ContextID: t.ContextID,
 			Status:    taskStatus{State: stateWorking, Timestamp: now()},
-			Kind:      "status-update",
-		})
+		}})
 	}
 	s.mu.Lock()
 	state = t.Status.State
 	s.mu.Unlock()
-	send(statusUpdateEvent{
+	send(streamResult{StatusUpdate: &statusUpdateEvent{
 		TaskID:    t.ID,
 		ContextID: t.ContextID,
 		Status:    taskStatus{State: state, Timestamp: now()},
-		Final:     isTerminal(state),
-		Kind:      "status-update",
-	})
+	}})
 }
 
 func (s *server) handleGet(w http.ResponseWriter, req rpcRequest) {
@@ -743,6 +785,7 @@ func (s *server) handleGet(w http.ResponseWriter, req rpcRequest) {
 		writeRPCError(w, req.ID, -32001, "task not found")
 		return
 	}
+	// GetTask returns a bare Task (not wrapped in a oneof).
 	writeRPC(w, http.StatusOK, rpcResponse{ID: req.ID, Result: snap})
 }
 
@@ -778,6 +821,7 @@ func (s *server) handleCancel(w http.ResponseWriter, req rpcRequest) {
 		writeRPCError(w, req.ID, -32001, "task not found")
 		return
 	}
+	// CancelTask returns a bare Task (not wrapped in a oneof).
 	writeRPC(w, http.StatusOK, rpcResponse{ID: req.ID, Result: snap})
 }
 
@@ -793,8 +837,6 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/agent-card.json", srv.serveCard)
-	// legacy pre-v0.3.0 path, kept for backward compatibility
-	mux.HandleFunc("/.well-known/agent.json", srv.serveCard)
 	mux.HandleFunc("/a2a", srv.handleA2A)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
