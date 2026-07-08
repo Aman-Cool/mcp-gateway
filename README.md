@@ -74,7 +74,7 @@ The durable value isn't protocol plumbing.., it's that inter-agent traffic picks
 
 ## How it works
 
-Two flows carry the whole story. Discovery, the broker serves each registered agent's card with its `url` rewritten to the gateway path, which is the load-bearing trick that makes *unmodified* A2A clients route through the gateway:
+Two flows carry the whole story. Discovery, the broker serves each registered agent's signed card **verbatim** and advertises the gateway path through an RFC 9727 catalog, so *unmodified* A2A clients route through the gateway without the card's signature ever being touched:
 
 ```mermaid
 sequenceDiagram
@@ -89,7 +89,7 @@ sequenceDiagram
     Client->>Gateway: GET /a2a/mcp-test/weather/.well-known/agent-card.json
     Broker->>Agent: periodic card refresh (ticker, conditional GET)
     Note over Broker: serve the signed card verbatim<br/>(a rewrite would void the JWS signature)
-    Broker-->>Client: AgentCard (signature intact) ; catalog link routes to the gateway
+    Broker-->>Client: AgentCard (signature intact) — catalog link routes to the gateway
 ```
 
 And invocation.., the ext_proc router detects A2A by path prefix, routes to the right upstream, and isolates task IDs so clients never see upstream identifiers:
