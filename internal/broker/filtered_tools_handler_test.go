@@ -60,7 +60,7 @@ func createTestManager(t *testing.T, serverName, prefix string, tools []mcp.Tool
 		Name:   serverName,
 		Prefix: prefix,
 		URL:    "http://test.local/mcp",
-	}, "")
+	}, "", nil)
 	manager, err := upstream.NewUpstreamMCPManager(mcpServer, newMockGateway(), nil, slog.Default(), 0, mcpv1alpha1.InvalidToolPolicyFilterOut)
 	require.NoError(t, err)
 	// populate tools directly for testing (this requires accessing internal state)
@@ -97,6 +97,37 @@ func TestFilteredTools(t *testing.T) {
 			enforceFilterList: true,
 			ExpectedTools: []mcp.Tool{
 				{Name: "test_tool"},
+			},
+		},
+		{
+			// userSpecificList servers cache no managed tools (fetched per-request and
+			// merged into the result before filtering). The JWT filter must keep them
+			// rather than rebuild the list from cached managed tools, which drops them.
+			Name: "keeps user-specific tools alongside cached tools",
+			FullToolList: &mcp.ListToolsResult{Tools: []*mcp.Tool{
+				{Name: "std_list_repos"},
+				{Name: "us_create_issue", Meta: mcp.Meta{"kuadrant/id": "mcp-test/user-server"}},
+			}},
+			RegisteredMCPServers: map[config.UpstreamMCPID]upstream.ActiveMCPServer{
+				"mcp-test/std-server:std_:http://test.local/mcp": upstream.NewActiveForTesting(createTestManager(t,
+					"mcp-test/std-server",
+					"std_",
+					[]mcp.Tool{{Name: "list_repos"}},
+				)),
+				"mcp-test/user-server:us_:http://test.local/mcp": upstream.NewActiveForTesting(createTestManager(t,
+					"mcp-test/user-server",
+					"us_",
+					nil,
+				)),
+			},
+			AllowedToolsList: map[string][]string{
+				"mcp-test/std-server":  {"list_repos"},
+				"mcp-test/user-server": {"create_issue"},
+			},
+			enforceFilterList: true,
+			ExpectedTools: []mcp.Tool{
+				{Name: "std_list_repos"},
+				{Name: "us_create_issue"},
 			},
 		},
 		{

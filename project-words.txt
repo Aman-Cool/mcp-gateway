@@ -195,6 +195,7 @@ jsonschema
 JWS
 jwtmgr
 Kagenti
+keepalive
 keyout
 kgateway
 Kiali
