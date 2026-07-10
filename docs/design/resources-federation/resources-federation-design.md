@@ -13,13 +13,13 @@ Add partial support for federating MCP Resources through the gateway. The broker
 
 ## Non-Goals
 
-- Non `ui://` URI schemes - tracked in [#1238](https://github.com/Kuadrant/mcp-gateway/issues/1238)
+- Non-`ui://` URI schemes - tracked in [#1238](https://github.com/Kuadrant/mcp-gateway/issues/1238)
 - Resource subscriptions - the 2026-07-28 spec update (SEP-2567) removes protocol sessions and restricts server-to-client requests, fundamentally changing the delivery model. Scope narrowed per [guidance on #788](https://github.com/Kuadrant/mcp-gateway/issues/788#issuecomment-4682923399); tracked separately as #597 (closed)
 - URI templates (`resources/templates/list`)
 - Stateless (Streamable HTTP) protocol support
 - VirtualServer filtering for resources
 - `cacheScope` / `ttlMs` cache-aware proxying (SEP-2549, future consideration - see [scoping discussion on #788](https://github.com/Kuadrant/mcp-gateway/issues/788#issuecomment-4682923399)). If built, invalidation should be `ttlMs`-based rather than relying on `notifications/resources/list_changed`, since SEP-2567 restricts the server-to-client push that notification depends on.
-- Pagination - `resources/list` supports cursor-based pagination in the spec; aggregating cursors across multiple upstreams is a non-trivial problem deferred to a follow-up
+- Pagination - `resources/list` supports cursor-based pagination in the spec; aggregating cursors across multiple upstreams is a non-trivial problem deferred to a follow-up. In the meantime, each upstream is only fetched for its first page: a `nextCursor` in an upstream's response is not followed, so that upstream's remaining resources are left out of the federated list. `AddAfterListResources` logs when an upstream's response includes a `nextCursor`, so a paginated upstream showing up as partial is observable rather than silent, the same treatment as an upstream that errors or times out.
 
 ## Design
 
@@ -31,12 +31,12 @@ No breaking changes. No CRD fields are added or renamed, no existing headers are
 
 The gateway injects the server's existing `prefix` into the authority segment of the `ui://` URI:
 
-```
+```text
 ui://template.html  →  ui://{prefix}template.html
 ```
 
 For example, with prefix `insights_`:
-```
+```text
 ui://template.html  →  ui://insights_template.html
 ```
 
@@ -46,7 +46,7 @@ The router extracts the prefix back out by matching the authority against regist
 
 **Conflict detection**: Because resource URIs are namespaced by prefix, collisions can only occur if two servers share the same prefix, which is already rejected at the MCPServerRegistration level. No additional conflict detection pass is needed for resources.
 
-**Prefix safety for URI injection**: the CRD's existing `+kubebuilder:validation:Pattern=^[a-z0-9][a-z0-9_]*$` on `prefix` already excludes `/`, `?`, and `#`, so today's tool-naming validation happens to be URI-authority-safe too. That's coincidental, not designed in - the pattern exists to stop tool-name collisions, not to guarantee URI safety, and tools/prompts only ever concatenate the prefix as a plain string. As defense-in-depth, `GetServerInfoByResource` and the URI-rewrite path re-check for `/`, `?`, and `#` at the point the prefix is injected into the `ui://` authority, independent of the CRD validation. A server whose prefix fails this check is excluded from resource federation, same as a server with no prefix at all - so a future loosening of the CRD pattern for tool-naming reasons can't silently open a URI-injection path for resources.
+**Prefix safety for URI injection**: the CRD's existing `+kubebuilder:validation:Pattern=^[a-z0-9][a-z0-9_]*$` on `prefix` already restricts it to `[a-z0-9_]`, so today's tool-naming validation happens to be URI-authority-safe too. That's coincidental, not designed in - the pattern exists to stop tool-name collisions, not to guarantee URI safety, and tools/prompts only ever concatenate the prefix as a plain string. Blocklisting just `/`, `?`, and `#` isn't enough defense-in-depth on its own: if the CRD pattern is ever loosened, characters like `@`, `:`, brackets, or percent-encoding can still change how a URI's authority is parsed or normalized without being any of those three. As defense-in-depth, `GetServerInfoByResource` and the URI-rewrite path both re-validate the prefix against an allowlist, the same `[a-z0-9_]+` charset the CRD pattern already enforces, rather than blocklisting a handful of unsafe characters, independent of the CRD validation itself. A server whose prefix fails this check is excluded from resource federation, same as a server with no prefix at all - so a future loosening of the CRD pattern for tool-naming reasons can't silently open a URI-injection path for resources.
 
 ### Architecture
 
@@ -54,54 +54,50 @@ No new components. The existing broker, upstream connections, and router are ext
 
 Unlike tools and prompts, resources will not be pre-registered into mcp-go. An upstream can expose a large number of resources and pre-registering them would duplicate upstream state with no benefit. The `AddAfterListResources` hook fetches from each upstream at request time instead.
 
-```text
-resources/list flow:
+**resources/list flow:**
 
-  Client → Envoy → ext_proc (router) → HandleNoneToolCall()
-                                              │
-                                        sets headers:
-                                        mcp-server-name = mcpBroker
-                                              │
-                                        Envoy routes to broker
-                                              │
-                                        Broker's mcp-go server
-                                        handles resources/list
-                                              │
-                                        AddAfterListResources hook:
-                                          for each upstream: ListResources()
-                                          rewrite ui:// URIs with prefix
-                                          merge into result
-                                              │
-                                        returns federated resources to client
+```mermaid
+sequenceDiagram
+        title resources/list flow
+        MCPClient-->>Gateway: POST /mcp resources/list
+        Gateway-->>MCPRouter: POST /mcp resources/list
+        MCPRouter-->>MCPRouter: HandleNoneToolCall() sets mcp-server-name=mcpBroker
+        MCPRouter-->>Gateway: routing
+        Gateway-->>MCPBroker: POST /mcp resources/list
+        MCPBroker-->>Upstream: ListResources() (per upstream, concurrent)
+        Upstream-->>MCPBroker: resources
+        note right of MCPBroker: AddAfterListResources hook<br/>rewrite ui:// URIs with prefix<br/>merge into result
+        MCPBroker-->>MCPClient: federated resources/list result
+```
 
+**resources/read flow:**
 
-resources/read flow:
+```mermaid
+sequenceDiagram
+        title resources/read flow
+        MCPClient-->>Gateway: POST /mcp resources/read (params.uri)
+        Gateway-->>MCPRouter: POST /mcp resources/read
+        MCPRouter-->>MCPRouter: validateSession()
+        MCPRouter-->>MCPRouter: extract params.uri, parse authority segment
+        MCPRouter-->>MCPRouter: GetServerInfoByResource(uri)
+        MCPRouter-->>MCPRouter: strip prefix, reconstruct original URI
+        MCPRouter-->>MCPRouter: rewrite params.uri, set routing headers
+        MCPRouter-->>Gateway: routing
+        Gateway-->>Upstream: POST /mcp resources/read (original uri)
+        Upstream-->>MCPClient: resource contents
+```
 
-  Client → Envoy → ext_proc (router) → HandleResourceRead()
-                                              │
-                                        1. validateSession() (same check HandleToolCall uses)
-                                        2. Extract params.uri from body
-                                        3. Parse authority segment
-                                        4. GetServerInfoByResource(uri)
-                                        5. Strip prefix, reconstruct original URI
-                                        6. Rewrite params.uri in request body
-                                        7. Set routing headers
-                                              │
-                                        Envoy routes to upstream MCP server
-                                              │
-                                        returns resource contents to client
+**tools/call with `_meta.ui.resourceUri` (response rewrite):**
 
-
-tools/call with _meta.ui.resourceUri:
-
-  Client → Envoy → ext_proc (router) → HandleToolCall() → upstream
-                                              ←
-                                        response arrives at router
-                                        resourceURIRewriter.Process():
-                                          if _meta.ui.resourceUri present:
-                                            rewrite URI to prefixed form
-                                              ←
-                                        returns to client with prefixed URI
+```mermaid
+sequenceDiagram
+        title tools/call response rewrite
+        MCPClient-->>Gateway: POST /mcp tools/call
+        Gateway-->>MCPRouter: POST /mcp tools/call
+        MCPRouter-->>Upstream: HandleToolCall() routes request
+        Upstream-->>MCPRouter: tools/call response
+        note right of MCPRouter: resourceURIRewriter.Process()<br/>rewrite _meta.ui.resourceUri to prefixed form, if present
+        MCPRouter-->>MCPClient: response with prefixed resourceUri
 ```
 
 ### Component Changes
@@ -157,9 +153,9 @@ Enforcement doesn't change here: a missing `resources` key makes no assertion ab
 
 ### Security Considerations
 
-- Prefix values are re-checked against `/`, `?`, and `#` at the point they're injected into a `ui://` authority segment, independent of the CRD's `prefix` pattern validation - defense-in-depth in case that pattern is loosened later for tool-naming reasons alone. See "Prefix safety for URI injection" above.
+- Prefix values are re-validated against an allowlist (`[a-z0-9_]+`), not a blocklist of a few unsafe characters, at the point they're injected into a `ui://` authority segment, independent of the CRD's `prefix` pattern validation - defense-in-depth in case that pattern is loosened later for tool-naming reasons alone. See "Prefix safety for URI injection" above.
 - URI prefix matching is done against the server's registered prefix, not free-form input from the client. An unrecognized prefix in `resources/read` returns a routing error, same as an unknown tool name.
-- The `_meta.ui.resourceUri` rewrite only applies to `ui://` URIs. A non `ui://` value or malformed URI in `_meta` is left untouched.
+- The `_meta.ui.resourceUri` rewrite only applies to `ui://` URIs. A non-`ui://` value or malformed URI in `_meta` is left untouched.
 - `resources/read` routing uses the same client auth flow as `tools/call` - the client's Authorization header flows through to the upstream. `credentialRef` on MCPServerRegistration is only for broker-to-upstream connections, not client-facing auth.
 - No new privilege escalation surface. Resources are a distinct capability from tools and prompts in the JWT claim - authorization for tools on a server does not grant access to its resources.
 - The `resources` JWT claim and `filtered_resources_handler.go` only control what appears in `resources/list`, not what `resources/read` will serve. This mirrors an existing, documented limitation for tools: `MCPVirtualServer` hides tools from listing but does not prevent an authorized client from calling them directly (see `docs/design/security-architecture.md`), with real per-call enforcement left to AuthPolicy keyed on the `x-mcp-toolname`/`x-mcp-servername` headers the router sets before AuthPolicy evaluates. For the same AuthPolicy-based enforcement to apply to `resources/read`, `HandleResourceRead` needs to set `x-mcp-servername` (resolved via `GetServerInfoByResource`) as a routing header, the same way `HandleToolCall` does today. Without it, a client that already knows or guesses a valid prefixed `ui://` URI can read it regardless of what the `resources` claim allowed it to list.
