@@ -143,10 +143,14 @@ func TestMCPServersConfig_A2AAgentsAccessors(t *testing.T) {
 		t.Fatalf("unexpected agents: %+v", got)
 	}
 
-	// snapshot isolation: truncating the returned slice must not affect the config
-	got = got[:1]
-	if len(cfg.ListA2AAgents()) != 2 {
-		t.Fatal("ListA2AAgents did not return an isolated snapshot")
+	// snapshot isolation: appending to the returned slice must not grow the
+	// config's internal list (the returned slice header is a copy).
+	got = append(got, &A2AAgent{Name: "extra"})
+	if len(got) != 3 {
+		t.Fatalf("append failed: %d", len(got))
+	}
+	if again := cfg.ListA2AAgents(); len(again) != 2 {
+		t.Fatalf("ListA2AAgents did not return an isolated snapshot: got %d", len(again))
 	}
 
 	// Set replaces (not appends)
