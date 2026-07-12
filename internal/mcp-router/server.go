@@ -155,7 +155,7 @@ func (s *ExtProcServer) Process(stream extProcV3.ExternalProcessor_ProcessServer
 				if err := stream.Send(response); err != nil {
 					s.Logger.ErrorContext(ctx, "error sending response", "error", err)
 					recordError(span, err, 500)
-					return err //nolint:spancheck // ended via defer closure
+					return err
 				}
 			}
 			continue
