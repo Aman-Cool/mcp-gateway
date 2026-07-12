@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,12 +9,18 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+
 	"time"
+
+	"github.com/Kuadrant/mcp-gateway/internal/transport"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	mcpv1alpha1 "github.com/Kuadrant/mcp-gateway/api/v1alpha1"
 	"github.com/Kuadrant/mcp-gateway/internal/config"
@@ -28,7 +35,7 @@ func TestNewUpstreamMCP(t *testing.T) {
 		State:    string(mcpv1alpha1.ServerStateEnabled),
 		Hostname: "dummy",
 	}
-	up := NewUpstreamMCP(&testServer, "")
+	up := NewUpstreamMCP(&testServer, "", nil)
 	require.NotNil(t, up)
 	require.Equal(t, testServer, up.GetConfig())
 }
@@ -66,7 +73,7 @@ func TestMCPServer_IsEnabled(t *testing.T) {
 				Name:  "test",
 				State: tc.state,
 			}
-			up := NewUpstreamMCP(&server, "")
+			up := NewUpstreamMCP(&server, "", nil)
 			require.Equal(t, tc.expected, up.IsEnabled())
 		})
 	}
@@ -81,7 +88,7 @@ func TestNewUpstreamMCP_WithCACert(t *testing.T) {
 		Hostname: "dummy",
 		CACert:   "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
 	}
-	up := NewUpstreamMCP(&testServer, "")
+	up := NewUpstreamMCP(&testServer, "", nil)
 	require.NotNil(t, up)
 	cfg := up.GetConfig()
 	require.Equal(t, testServer.CACert, cfg.CACert)
@@ -144,15 +151,69 @@ func TestBuildHTTPClient_NoCACert(t *testing.T) {
 	up := NewUpstreamMCP(&config.MCPServer{
 		Name: "no-ca",
 		URL:  "http://localhost:8080/mcp",
-	}, "")
+	}, "", nil)
 	client, err := up.buildHTTPClient()
 	require.NoError(t, err)
 	require.NotNil(t, client, "should always return a client with timeouts set")
 
-	tr, ok := client.Transport.(*http.Transport)
-	require.True(t, ok, "transport should be *http.Transport")
+	tee, ok := client.Transport.(*toolHintsTee)
+	require.True(t, ok, "transport should be *toolHintsTee")
+	hrt, ok := tee.base.(*transport.HeaderRoundTripper)
+	require.True(t, ok, "tee base should be *transport.HeaderRoundTripper")
+	tr, ok := hrt.Base.(*http.Transport)
+	require.True(t, ok, "base transport should be *http.Transport")
 	require.Equal(t, defaultTLSHandshakeTimeout, tr.TLSHandshakeTimeout)
+	// bounds header wait only; SSE bodies stream untouched. zero here lets a
+	// silent upstream wedge the manager on any POST (initialize, tools/list).
 	require.Equal(t, defaultResponseHeaderTimeout, tr.ResponseHeaderTimeout)
+}
+
+// regression: the sdk opens a standalone GET SSE stream synchronously inside
+// Connect, on a context detached from the connect context, and treats its
+// failure as session-fatal after MaxRetries attempts each bounded only by
+// ResponseHeaderTimeout (~125s blocked, then a dead session). the sdk stream
+// is disabled and the GET belongs to the broker's notification watcher, so
+// an upstream that swallows GETs (seen with proxies and logging middleware
+// that eat Flush) must not delay or fail Connect at all, and the watcher
+// must keep retrying without harming the session.
+func TestConnectNotBlockedByStandaloneSSE(t *testing.T) {
+	old := defaultResponseHeaderTimeout
+	defaultResponseHeaderTimeout = 50 * time.Millisecond
+	defer func() { defaultResponseHeaderTimeout = old }()
+	oldBackoff := watchBackoff
+	watchBackoff.Duration = 20 * time.Millisecond
+	defer func() { watchBackoff = oldBackoff }()
+
+	s := mcp.NewServer(&mcp.Implementation{Name: "swallows-gets", Version: "0.0.1"}, nil)
+	inner := mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server { return s }, nil)
+	var gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+			<-r.Context().Done() // swallow the GET, send nothing
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	up := NewUpstreamMCP(&config.MCPServer{Name: "swallows-gets", URL: srv.URL}, "", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	require.NoError(t, up.Connect(ctx, func() {}), "connect must not depend on the standalone SSE GET")
+	require.Less(t, time.Since(start), 5*time.Second, "connect must not wait on the standalone GET")
+	defer func() { _ = up.Disconnect() }()
+
+	_, err := up.ListTools(ctx)
+	require.NoError(t, err)
+
+	// the watcher owns the GET and keeps retrying non-fatally
+	require.Eventually(t, func() bool { return gets.Load() >= 2 }, 10*time.Second, 10*time.Millisecond,
+		"watcher should retry the swallowed GET")
+	_, err = up.ListTools(ctx)
+	require.NoError(t, err, "session must stay healthy while the GET is swallowed")
 }
 
 func TestBuildHTTPClient_WithValidCACert(t *testing.T) {
@@ -162,7 +223,7 @@ func TestBuildHTTPClient_WithValidCACert(t *testing.T) {
 		Name:   "with-ca",
 		URL:    "https://localhost:8443/mcp",
 		CACert: string(caPEM),
-	}, "")
+	}, "", nil)
 	client, err := up.buildHTTPClient()
 	require.NoError(t, err)
 	require.NotNil(t, client, "should return custom client when CACert configured")
@@ -173,7 +234,7 @@ func TestBuildHTTPClient_WithInvalidPEM(t *testing.T) {
 		Name:   "bad-ca",
 		URL:    "https://localhost:8443/mcp",
 		CACert: "not-valid-pem-data",
-	}, "")
+	}, "", nil)
 	_, err := up.buildHTTPClient()
 	require.Error(t, err, "should error on invalid PEM")
 	require.Contains(t, err.Error(), "failed to parse CA certificate")
@@ -194,7 +255,7 @@ func TestBuildHTTPClient_TLSConnection(t *testing.T) {
 		Name:   "tls-test",
 		URL:    srv.URL + "/mcp",
 		CACert: string(caPEM),
-	}, "")
+	}, "", nil)
 	httpClient, err := up.buildHTTPClient()
 	require.NoError(t, err)
 	require.NotNil(t, httpClient)
@@ -221,7 +282,7 @@ func TestBuildHTTPClient_TLSConnectionFailsWithoutCA(t *testing.T) {
 	up := NewUpstreamMCP(&config.MCPServer{
 		Name: "no-ca-test",
 		URL:  srv.URL + "/mcp",
-	}, "")
+	}, "", nil)
 	httpClient, err := up.buildHTTPClient()
 	require.NoError(t, err)
 	require.NotNil(t, httpClient, "client is always returned, only TLS pool varies")
@@ -249,7 +310,7 @@ func TestBuildHTTPClient_WrongCACertFailsTLS(t *testing.T) {
 		Name:   "wrong-ca-test",
 		URL:    srv.URL + "/mcp",
 		CACert: string(wrongCaPEM),
-	}, "")
+	}, "", nil)
 	httpClient, err := up.buildHTTPClient()
 	require.NoError(t, err)
 	require.NotNil(t, httpClient)
@@ -278,7 +339,7 @@ func TestBuildHTTPClient_MultiCertBundle(t *testing.T) {
 		Name:   "bundle-test",
 		URL:    srv.URL + "/mcp",
 		CACert: string(bundle),
-	}, "")
+	}, "", nil)
 	httpClient, err := up.buildHTTPClient()
 	require.NoError(t, err)
 	require.NotNil(t, httpClient)
@@ -291,37 +352,60 @@ func TestBuildHTTPClient_MultiCertBundle(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-// TestBuildHTTPClient_ResponseHeaderTimeout verifies the upstream client does
-// not block indefinitely when an upstream server accepts the connection but
-// never sends response headers. Without ResponseHeaderTimeout the broker would
-// hang on this request forever.
-func TestBuildHTTPClient_ResponseHeaderTimeout(t *testing.T) {
-	prev := defaultResponseHeaderTimeout
+// ResponseHeaderTimeout bounds only the wait for response headers; it must
+// not tear down an SSE stream whose body outlives the timeout.
+func TestResponseHeaderTimeoutDoesNotKillEstablishedSSE(t *testing.T) {
+	old := defaultResponseHeaderTimeout
 	defaultResponseHeaderTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { defaultResponseHeaderTimeout = prev })
+	defer func() { defaultResponseHeaderTimeout = old }()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		require.NoError(t, http.NewResponseController(w).Flush())
+		// deliver an event well after the header timeout has elapsed
+		time.Sleep(3 * defaultResponseHeaderTimeout)
+		_, _ = w.Write([]byte("data: late\n\n"))
+		require.NoError(t, http.NewResponseController(w).Flush())
 	}))
 	defer srv.Close()
 
-	up := NewUpstreamMCP(&config.MCPServer{Name: "hang", URL: srv.URL + "/mcp"}, "")
+	up := NewUpstreamMCP(&config.MCPServer{Name: "sse-alive", URL: srv.URL}, "", nil)
 	httpClient, err := up.buildHTTPClient()
 	require.NoError(t, err)
-	require.NotNil(t, httpClient)
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
-
-	start := time.Now()
 	resp, err := httpClient.Do(req)
-	elapsed := time.Since(start)
-	if resp != nil {
-		_ = resp.Body.Close()
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "reading the SSE body past the header timeout must not error")
+	require.Contains(t, string(body), "data: late")
+}
+
+// regression: OnNotification used to be a no-op before Connect (nil client),
+// silently dropping list-changed deliveries. handlers are now stored on the
+// upstream and dispatched via middleware wired into every client before its
+// session connects. with the standalone SSE stream disabled the only push
+// channel left is a request-scoped stream, so the wiring is exercised at the
+// dispatch layer here; end-to-end refresh is covered by the manager tests.
+func TestOnNotification_RegisteredBeforeConnect(t *testing.T) {
+	up := NewUpstreamMCP(&config.MCPServer{Name: "up", URL: "http://unused/mcp"}, "", nil)
+	got := make(chan string, 1)
+	up.OnNotification(func(method string) { got <- method })
+
+	up.notify("notifications/tools/list_changed")
+
+	select {
+	case method := <-got:
+		require.Equal(t, "notifications/tools/list_changed", method)
+	default:
+		t.Fatal("handler registered before Connect was not dispatched")
 	}
-	require.Error(t, err, "expected timeout error from hanging server")
-	require.Less(t, elapsed, 2*time.Second, "client should give up well before 2s")
-	require.Contains(t, err.Error(), "timeout")
 }
 
 func TestBuildHTTPClient_GatewayCACertBundle(t *testing.T) {
@@ -338,7 +422,7 @@ func TestBuildHTTPClient_GatewayCACertBundle(t *testing.T) {
 	up := NewUpstreamMCP(&config.MCPServer{
 		Name: "gw-ca-test",
 		URL:  srv.URL + "/mcp",
-	}, string(caPEM))
+	}, string(caPEM), nil)
 	httpClient, err := up.buildHTTPClient()
 	require.NoError(t, err)
 
@@ -366,7 +450,7 @@ func TestBuildHTTPClient_GatewayCAPlusPerServerCA(t *testing.T) {
 		Name:   "combined-ca-test",
 		URL:    srv.URL + "/mcp",
 		CACert: string(serverCAPEM),
-	}, string(gwCAPEM))
+	}, string(gwCAPEM), nil)
 	httpClient, err := up.buildHTTPClient()
 	require.NoError(t, err)
 
@@ -382,7 +466,7 @@ func TestBuildHTTPClient_InvalidGatewayCACert(t *testing.T) {
 	up := NewUpstreamMCP(&config.MCPServer{
 		Name: "bad-gw-ca",
 		URL:  "https://localhost:8443/mcp",
-	}, "not-valid-pem")
+	}, "not-valid-pem", nil)
 	_, err := up.buildHTTPClient()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "gateway CA certificate bundle")
