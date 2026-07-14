@@ -71,62 +71,6 @@ When a gateway operator wants to confirm that the gateway, router, and broker ar
 
 ## Design
 
-### Broker Metrics
-
-The broker is the only component that sees discovery outcomes and upstream reachability. All metrics use the OpenTelemetry metrics API, consistent with existing OTel tracing in the broker.
-
-#### Discovery health
-
-```
-mcp_broker_discovery_total
-  type: counter
-  labels: server_name, status (success | failure)
-  description: number of discovery attempts per upstream server
-```
-
-```
-mcp_broker_discovery_duration_seconds
-  type: histogram
-  labels: server_name
-  description: time taken for tools/list calls during discovery
-```
-
-#### Tool inventory
-
-```
-mcp_broker_tools_discovered
-  type: gauge
-  labels: server_name
-  description: current number of tools discovered per upstream server.
-               replaces the removed discoveredTools status field.
-               set to 0 when a server becomes unreachable.
-```
-
-#### Upstream stability
-
-```
-mcp_broker_upstream_reconnections_total
-  type: counter
-  labels: server_name
-  description: number of upstream reconnection attempts.
-               frequent reconnections signal instability.
-```
-
-#### Context contribution
-
-```
-mcp_broker_tools_list_response_bytes
-  type: histogram
-  labels: server_name
-  description: size in bytes of tools/list response payloads per upstream server.
-               proxy for context contribution. aggregate across servers
-               gives total gateway context footprint.
-```
-
-#### Cardinality
-
-`server_name` is bounded by the number of `MCPServerRegistration` resources, which is operator-controlled and typically in the tens, not thousands. No high-cardinality labels (session IDs, tool call IDs) are used. These belong in traces and logs.
-
 ### Gateway Metrics (existing)
 
 These metrics already exist via Istio and require no new code:
@@ -135,6 +79,17 @@ These metrics already exist via Istio and require no new code:
 - `istio_request_duration_milliseconds` — request latency histogram
 
 These cover request rate, latency, and HTTP-level error rates per route. No new instrumentation needed, but they should be documented for operators.
+
+```promql
+# 5xx error rate per destination
+sum(rate(istio_requests_total{response_code=~"5.."}[5m])) by (destination_service_name)
+
+# 4xx rate per destination (likely misconfiguration)
+sum(rate(istio_requests_total{response_code=~"4.."}[5m])) by (destination_service_name)
+
+# p99 request latency per destination
+histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[5m])) by (destination_service_name, le))
+```
 
 ### Istio Telemetry Tag Overrides (optional)
 
@@ -175,6 +130,101 @@ spec:
 ```
 
 A reference configuration will be provided in `examples/otel/istio-mcp-metrics.yaml`. Cardinality scales with the number of unique tools, which is operator-controlled.
+
+```promql
+# request rate per MCP server
+sum(rate(istio_requests_total[5m])) by (mcp_server_name)
+
+# top 10 most called tools
+topk(10, sum(rate(istio_requests_total[5m])) by (mcp_tool_name))
+
+# p99 tool call latency per MCP server
+histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[5m])) by (mcp_server_name, le))
+```
+
+### Broker Metrics
+
+The broker is the only component that sees discovery outcomes and upstream reachability. All metrics use the OpenTelemetry metrics API, consistent with existing OTel tracing in the broker.
+
+#### Discovery health
+
+```
+mcp_broker_discovery_total
+  type: counter
+  labels: server_name, status (success | failure)
+  description: number of discovery attempts per upstream server
+```
+
+```promql
+# discovery failure rate per server
+sum(rate(mcp_broker_discovery_total{status="failure"}[5m])) by (server_name)
+
+# failure ratio per server
+sum(mcp_broker_discovery_total{status="failure"}) by (server_name) / sum(mcp_broker_discovery_total) by (server_name)
+```
+
+```
+mcp_broker_discovery_duration_seconds
+  type: histogram
+  labels: server_name
+  description: time taken for tools/list calls during discovery
+```
+
+```promql
+# p99 discovery latency per server
+histogram_quantile(0.99, sum(rate(mcp_broker_discovery_duration_seconds_bucket[5m])) by (server_name, le))
+```
+
+#### Tool inventory
+
+```
+mcp_broker_tools_discovered
+  type: gauge
+  labels: server_name
+  description: current number of tools discovered per upstream server.
+               replaces the removed discoveredTools status field.
+               set to 0 when a server becomes unreachable.
+```
+
+```promql
+# current tool count per server
+sum(mcp_broker_tools_discovered) by (server_name)
+```
+
+#### Upstream stability
+
+```
+mcp_broker_upstream_reconnections_total
+  type: counter
+  labels: server_name
+  description: number of upstream reconnection attempts.
+               frequent reconnections signal instability.
+```
+
+```promql
+# servers currently experiencing reconnections
+sum(rate(mcp_broker_upstream_reconnections_total[5m])) by (server_name) > 0
+```
+
+#### Context contribution
+
+```
+mcp_broker_tools_list_response_bytes
+  type: gauge
+  labels: server_name
+  description: last observed size in bytes of tools/list response per upstream server.
+               updates on each discovery. sum across servers gives total
+               gateway context footprint.
+```
+
+```promql
+# total tools/list payload across all servers
+sum(mcp_broker_tools_list_response_bytes)
+```
+
+#### Cardinality
+
+`server_name` is bounded by the number of `MCPServerRegistration` resources, which is operator-controlled and typically in the tens, not thousands. No high-cardinality labels (session IDs, tool call IDs) are used. These belong in traces and logs.
 
 ### Metrics Endpoint
 
