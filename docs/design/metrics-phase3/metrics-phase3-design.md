@@ -35,8 +35,6 @@ Add OpenTelemetry metrics to the broker for discovery health, tool counts, and r
 
 The gateway operator: the person deploying the MCP Gateway, creating `MCPServerRegistration` resources, and wiring upstream MCP servers. They need to know if their configuration is working and how traffic is flowing.
 
-MCP-level application errors (a tool returning `isError: true` inside an HTTP 200 JSON-RPC response) are out of scope. If the gateway routed the request and got a response, the gateway did its job. Tool execution errors are the concern of MCP server developers, not gateway operators. See [MCP spec: Tools - Error Handling](https://modelcontextprotocol.io/specification/2025-06-18/server/tools).
-
 ## Metrics Sources
 
 Three components can surface metrics, each covering a different layer:
@@ -65,7 +63,7 @@ When a gateway operator receives reports of slow tool calls, they want to see pe
 
 When a gateway operator wants to understand how much tool metadata the gateway is contributing to conversations across all federated servers, they want to see tool list response sizes and tool counts per server, so that they can identify servers contributing disproportionate context and make informed decisions about which servers to expose, filter, or prioritize for output compression.
 
-This concern is not unique to gateway operators. Context bloat from tool metadata is a common problem for any MCP client pulling tools from multiple servers. The gateway is the natural aggregation point for this data, providing centralized visibility that individual MCP clients and server developers cannot easily get on their own.
+Context bloat from tool metadata is a common problem for any MCP client pulling tools from multiple servers. The gateway is the natural aggregation point, providing centralized visibility across all servers.
 
 ### When the operator needs to confirm gateway infrastructure is healthy
 
@@ -136,12 +134,7 @@ These metrics already exist via Istio and require no new code:
 - `istio_requests_total` — request count by response code, reporter, source, destination
 - `istio_request_duration_milliseconds` — request latency histogram
 
-For the operator, these answer:
-- Are client requests reaching upstreams and getting responses? (filter by status code)
-- How fast are tool calls end-to-end? (latency by destination)
-- Is one route/server seeing more errors than others? (filter by destination and status)
-
-HTTP 4xx/5xx from the gateway indicates configuration or upstream problems the operator needs to see. HTTP 200 means the gateway did its job, regardless of MCP-level tool errors in the response body.
+These cover request rate, latency, and HTTP-level error rates per route. No new instrumentation needed, but they should be documented for operators.
 
 ### Istio Telemetry Tag Overrides (optional)
 
@@ -181,9 +174,7 @@ spec:
           value: "request.headers['x-mcp-toolname']"
 ```
 
-This adds per-tool and per-server dimensions to gateway request rate and latency metrics. Cardinality scales with the number of unique tools, which is operator-controlled.
-
-A reference configuration will be provided in `examples/otel/istio-mcp-metrics.yaml`.
+A reference configuration will be provided in `examples/otel/istio-mcp-metrics.yaml`. Cardinality scales with the number of unique tools, which is operator-controlled.
 
 ### Metrics Endpoint
 
@@ -208,7 +199,7 @@ A tool call returning HTTP 200 with `isError: true` in the JSON-RPC result is in
 
 ### Router metrics deferred
 
-The router (ext_proc) processes every client request and has access to MCP method, tool name, and server name. Adding metrics here would provide native MCP-aware request rate and latency without depending on Istio tag overrides. This is deferred to a future phase to keep scope small.
+Adding metrics to the router would provide native MCP-aware request rate and latency without depending on Istio tag overrides. Deferred to keep scope small (see Metrics Sources table).
 
 ### No dashboards
 
