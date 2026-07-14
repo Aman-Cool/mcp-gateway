@@ -16,6 +16,7 @@ import (
 	"github.com/Kuadrant/mcp-gateway/internal/broker/upstream"
 	"github.com/Kuadrant/mcp-gateway/internal/config"
 	internaljwt "github.com/Kuadrant/mcp-gateway/internal/jwt"
+	"github.com/Kuadrant/mcp-gateway/internal/routing"
 	"github.com/Kuadrant/mcp-gateway/internal/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
@@ -67,6 +68,9 @@ type MCPBroker interface {
 
 	// IsBrokerToolName returns true if the given tool name is a broker-internal meta-tool
 	IsBrokerToolName(name string) bool
+
+	// RoutingTable returns a consistent snapshot of tool/prompt → server routing data
+	RoutingTable() routing.RoutingTable
 
 	// Shutdown closes any resources associated with this Broker
 	Shutdown(ctx context.Context) error
@@ -130,6 +134,10 @@ type mcpBrokerImpl struct {
 	// userSessionPool caches upstream client sessions per (gateway-session, server)
 	// so that repeated tools/list calls reuse the same upstream session.
 	userSessionPool sync.Map
+
+	// cachedTable holds the latest routing table snapshot, rebuilt on config
+	// or tool/prompt list changes. RoutingTable() returns a pointer load.
+	cachedTable atomic.Pointer[routing.Table]
 
 	// tagsToolsRegistered tracks whether list_tags/filter_tools_by_tags are currently registered
 	tagsToolsRegistered atomic.Bool
@@ -289,6 +297,11 @@ func NewBroker(logger *slog.Logger, opts ...Option) MCPBroker {
 	srv.AddReceivingMiddleware(mcpBkr.tracingMiddleware(), mcpBkr.filteringMiddleware())
 
 	mcpBkr.gatewayServer = newGatewayServer(srv)
+	mcpBkr.gatewayServer.onTableChange = func() {
+		mcpBkr.mcpLock.RLock()
+		defer mcpBkr.mcpLock.RUnlock()
+		mcpBkr.refreshRoutingTable()
+	}
 	srv.AddSendingMiddleware(mcpBkr.gatewayServer.notifyTargetMiddleware())
 
 	if mcpBkr.discovery.enabled {
@@ -507,6 +520,8 @@ func (m *mcpBrokerImpl) startManagers(ctx context.Context, servers []*config.MCP
 	}
 	m.virtualServers = next
 	m.vsLock.Unlock()
+
+	m.refreshRoutingTable()
 }
 
 func (m *mcpBrokerImpl) RegisteredMCPServers() map[config.UpstreamMCPID]upstream.ActiveMCPServer {
