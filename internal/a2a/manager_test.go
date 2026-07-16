@@ -141,6 +141,28 @@ func TestCardURL(t *testing.T) {
 	}
 }
 
+func TestRefreshAll_RefreshesEveryAgentUnderItsPathKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"x"}`))
+	}))
+	defer srv.Close()
+
+	b := newTestBroker()
+	// two agents in different namespaces; keys are {namespace}/{agentPrefix}, distinct from Name
+	b.SetAgents([]*config.A2AAgent{
+		{Name: "ns-a/weather-agent", AgentPrefix: "weather", URL: srv.URL},
+		{Name: "ns-b/search-agent", AgentPrefix: "search", URL: srv.URL},
+	})
+	b.refreshAll(context.Background())
+
+	if _, ok := b.store.Get("ns-a", "weather"); !ok {
+		t.Fatal("ns-a/weather card not refreshed")
+	}
+	if _, ok := b.store.Get("ns-b", "search"); !ok {
+		t.Fatal("ns-b/search card not refreshed")
+	}
+}
+
 func TestSetAgents_EvictsRemovedCard(t *testing.T) {
 	b := newTestBroker()
 	b.SetAgents([]*config.A2AAgent{{Name: "mcp-test/weather-agent", AgentPrefix: "weather"}})
