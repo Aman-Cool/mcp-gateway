@@ -264,6 +264,53 @@ var _ = Describe("A2AAgentRegistration Controller", func() {
 			Expect(configWriter.upsertedAgents).NotTo(HaveKey(fmt.Sprintf("default/default/%s", loserName)))
 		})
 
+		It("should fan out config to every valid extension namespace and remove from all on deletion", func() {
+			const nsTwo = "a2a-fanout-ns-two"
+			const extTwoName = "test-a2a-ext-two"
+			const grantName = "allow-ext-two-to-gw"
+
+			// a second MCPGatewayExtension in another namespace, targeting the same gateway
+			// cross-namespace — permitted by a ReferenceGrant in the gateway's namespace and Ready
+			if err := testK8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsTwo}}); err != nil {
+				Expect(errors.IsAlreadyExists(err)).To(BeTrue())
+			}
+			Expect(testK8sClient.Create(ctx, createTestExtReferenceGrant(grantName, "default", nsTwo))).To(Succeed())
+			Expect(testK8sClient.Create(ctx, createTestMCPGatewayExtension(extTwoName, nsTwo, gatewayName, "default"))).To(Succeed())
+			Eventually(func(g Gomega) {
+				ext := &mcpv1alpha1.MCPGatewayExtension{}
+				g.Expect(testK8sClient.Get(ctx, types.NamespacedName{Name: extTwoName, Namespace: nsTwo}, ext)).To(Succeed())
+				ext.SetReadyCondition(metav1.ConditionTrue, mcpv1alpha1.ConditionReasonSuccess, "ready")
+				g.Expect(testK8sClient.Status().Update(ctx, ext)).To(Succeed())
+			}, testTimeout, testRetryInterval).Should(Succeed())
+			DeferCleanup(func() {
+				forceDeleteTestMCPGatewayExtension(ctx, extTwoName, nsTwo)
+				_ = testK8sClient.Delete(ctx, createTestExtReferenceGrant(grantName, "default", nsTwo))
+			})
+
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "weather")
+			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			agentName := a2aAgentName(&mcpv1alpha1.A2AAgentRegistration{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: "default"},
+			})
+
+			// config fans out to BOTH extension namespaces
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.upsertedAgents).To(HaveKey(fmt.Sprintf("default/%s", agentName)))
+				g.Expect(configWriter.upsertedAgents).To(HaveKey(fmt.Sprintf("%s/%s", nsTwo, agentName)))
+			})
+
+			// deletion removes the agent cluster-wide (both namespaces' config secrets)
+			Expect(testK8sClient.Delete(ctx, a2areg)).To(Succeed())
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.removedAgents).To(ContainElement(agentName))
+			})
+		})
+
 		It("should call RemoveA2AAgent and drop the finalizer on deletion", func() {
 			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "weather")
 			Expect(testK8sClient.Create(ctx, a2areg)).To(Succeed())
@@ -725,6 +772,32 @@ func createTestA2AReferenceGrant(name, namespace, fromNamespace string) *gateway
 				{
 					Group: gatewayv1beta1.Group(gatewayv1.GroupVersion.Group),
 					Kind:  "HTTPRoute",
+				},
+			},
+		},
+	}
+}
+
+// createTestExtReferenceGrant creates a ReferenceGrant in the gateway's namespace permitting
+// MCPGatewayExtensions from fromNamespace to reference Gateways.
+func createTestExtReferenceGrant(name, namespace, fromNamespace string) *gatewayv1beta1.ReferenceGrant {
+	return &gatewayv1beta1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1beta1.ReferenceGrantFrom{
+				{
+					Group:     gatewayv1beta1.Group(mcpv1alpha1.GroupVersion.Group),
+					Kind:      "MCPGatewayExtension",
+					Namespace: gatewayv1beta1.Namespace(fromNamespace),
+				},
+			},
+			To: []gatewayv1beta1.ReferenceGrantTo{
+				{
+					Group: gatewayv1beta1.Group(gatewayv1.GroupVersion.Group),
+					Kind:  "Gateway",
 				},
 			},
 		},
