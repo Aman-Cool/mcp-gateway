@@ -67,6 +67,7 @@ func (b *Broker) SetAgents(agents []*config.A2AAgent) {
 	b.agents = next
 	b.mu.Unlock()
 	b.evictStaleCards(next)
+	b.refreshNewCards(next)
 	b.logger.Debug("a2a broker agents updated", "count", len(next))
 }
 
