@@ -51,6 +51,33 @@ func (b *Broker) refreshAll(ctx context.Context) {
 	}
 }
 
+// refreshNewCards fetches, in the background, the cards for agents that have no cached entry
+// yet — a newly-registered agent, most often. Without this a new agent's card is unavailable
+// until the next refresh tick (up to the ticker interval); this makes it available promptly.
+// Only uncached agents are fetched, so a config change never re-fetches the whole set, and the
+// fetches run sequentially in a single goroutine to avoid a burst against upstreams.
+func (b *Broker) refreshNewCards(agents map[string]*config.A2AAgent) {
+	type target struct {
+		namespace, prefix string
+		agent             *config.A2AAgent
+	}
+	var pending []target
+	for key, agent := range agents {
+		namespace, prefix, _ := strings.Cut(key, "/")
+		if _, ok := b.store.Get(namespace, prefix); !ok {
+			pending = append(pending, target{namespace, prefix, agent})
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+	go func() {
+		for _, t := range pending {
+			b.refreshCard(context.Background(), t.namespace, t.prefix, t.agent)
+		}
+	}()
+}
+
 // refreshCard fetches one agent's AgentCard with a conditional GET and updates the store
 // only when the content changes. On any error it leaves the existing (stale) entry in
 // place — stale-on-error — so a transient upstream blip never drops a servable card. The

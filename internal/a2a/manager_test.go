@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,6 +161,55 @@ func TestRefreshAll_RefreshesEveryAgentUnderItsPathKey(t *testing.T) {
 	}
 	if _, ok := b.store.Get("ns-b", "search"); !ok {
 		t.Fatal("ns-b/search card not refreshed")
+	}
+}
+
+func TestSetAgents_RefreshesNewAgentCard(t *testing.T) {
+	const card = `{"name":"weather"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(card))
+	}))
+	defer srv.Close()
+
+	b := NewBroker(slog.Default(), NewMemoryStore(), time.Minute)
+	b.SetAgents([]*config.A2AAgent{
+		{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: srv.URL},
+	})
+
+	// the card is fetched asynchronously on config change, not on the (1-minute) ticker
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if e, ok := b.store.Get("mcp-test", "weather"); ok && string(e.Raw) == card {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("new agent's card was not refreshed on config change")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSetAgents_DoesNotRefetchCachedAgents(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+
+	b := NewBroker(slog.Default(), NewMemoryStore(), time.Minute)
+	b.store.Set("mcp-test", "weather", CardEntry{Raw: []byte("cached")}) // already cached
+	b.SetAgents([]*config.A2AAgent{
+		{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: srv.URL},
+	})
+
+	// give any stray goroutine a moment; a cached agent must not be re-fetched
+	time.Sleep(50 * time.Millisecond)
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("cached agent must not be re-fetched on config change, got %d hits", n)
+	}
+	if e, _ := b.store.Get("mcp-test", "weather"); string(e.Raw) != "cached" {
+		t.Fatal("cached card must be preserved")
 	}
 }
 
