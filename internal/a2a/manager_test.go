@@ -22,6 +22,14 @@ func agentFor(url string) *config.A2AAgent {
 	return &config.A2AAgent{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: url}
 }
 
+// register makes an agent the current registration for its path key, so refreshCard stores
+// its card (refreshCard only writes for a currently-registered agent).
+func (b *Broker) register(a *config.A2AAgent) {
+	b.mu.Lock()
+	b.agents[pathKey(a)] = a
+	b.mu.Unlock()
+}
+
 func TestRefreshCard_200StoresRawCard(t *testing.T) {
 	const card = `{"name":"weather","supportedInterfaces":[]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +42,9 @@ func TestRefreshCard_200StoresRawCard(t *testing.T) {
 	defer srv.Close()
 
 	b := newTestBroker()
-	b.refreshCard(context.Background(), "mcp-test", "weather", agentFor(srv.URL))
+	a := agentFor(srv.URL)
+	b.register(a)
+	b.refreshCard(context.Background(), "mcp-test", "weather", a)
 
 	e, ok := b.store.Get("mcp-test", "weather")
 	if !ok || string(e.Raw) != card {
@@ -42,6 +52,65 @@ func TestRefreshCard_200StoresRawCard(t *testing.T) {
 	}
 	if e.ETag != `"v1"` || e.SHA256 == "" {
 		t.Fatalf("card metadata not captured: %+v", e)
+	}
+}
+
+func TestRefreshCard_OversizeRejected(t *testing.T) {
+	big := make([]byte, maxCardBytes+100)
+	for i := range big {
+		big[i] = 'a'
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(big)
+	}))
+	defer srv.Close()
+
+	b := newTestBroker()
+	a := agentFor(srv.URL)
+	b.register(a)
+	b.store.Set("mcp-test", "weather", CardEntry{Raw: []byte("stale")})
+	b.refreshCard(context.Background(), "mcp-test", "weather", a)
+
+	e, _ := b.store.Get("mcp-test", "weather")
+	if string(e.Raw) != "stale" {
+		t.Fatalf("oversize card must be rejected and the stale card kept, got %d bytes", len(e.Raw))
+	}
+}
+
+func TestRefreshCard_SkipsStoreWhenAgentNotCurrent(t *testing.T) {
+	const card = `{"name":"weather"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(card))
+	}))
+	defer srv.Close()
+
+	b := newTestBroker()
+	// the agent is fetched but never registered (removed/replaced during the fetch)
+	b.refreshCard(context.Background(), "mcp-test", "weather", agentFor(srv.URL))
+
+	if _, ok := b.store.Get("mcp-test", "weather"); ok {
+		t.Fatal("a card fetched for a no-longer-registered agent must not be stored")
+	}
+}
+
+func TestRefreshCard_DoesNotClobberReplacedAgent(t *testing.T) {
+	const oldCard = `{"name":"old"}`
+	oldSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(oldCard))
+	}))
+	defer oldSrv.Close()
+
+	b := newTestBroker()
+	// a new agent (different upstream URL) now holds the same namespace/prefix, card already cached
+	b.register(&config.A2AAgent{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: "http://new-agent:9090"})
+	b.store.Set("mcp-test", "weather", CardEntry{Raw: []byte(`{"name":"new"}`)})
+
+	// a slow fetch for the old agent completes now — it must not overwrite the replacement's card
+	b.refreshCard(context.Background(), "mcp-test", "weather", agentFor(oldSrv.URL))
+
+	e, _ := b.store.Get("mcp-test", "weather")
+	if string(e.Raw) != `{"name":"new"}` {
+		t.Fatalf("a stale fetch clobbered the replacement agent's card: %q", e.Raw)
 	}
 }
 

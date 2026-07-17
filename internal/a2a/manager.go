@@ -113,11 +113,17 @@ func (b *Broker) refreshCard(ctx context.Context, namespace, prefix string, agen
 	switch {
 	case resp.StatusCode == http.StatusNotModified && hasPrev:
 		prev.FetchedAt = time.Now()
-		b.store.Set(namespace, prefix, prev)
+		b.storeIfCurrent(namespace, prefix, agent, prev)
 	case resp.StatusCode == http.StatusOK:
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxCardBytes))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxCardBytes+1))
 		if err != nil {
 			b.logger.Warn("a2a card read failed, keeping stale card", "agent", agent.Name, "error", err)
+			return
+		}
+		if int64(len(body)) > maxCardBytes {
+			// reject rather than cache a truncated card — a clipped signed card would fail verification
+			b.logger.Warn("a2a card exceeds max size, keeping stale card",
+				"agent", agent.Name, "limit", maxCardBytes)
 			return
 		}
 		sum := sha256.Sum256(body)
@@ -127,10 +133,10 @@ func (b *Broker) refreshCard(ctx context.Context, namespace, prefix string, agen
 			prev.FetchedAt = time.Now()
 			prev.ETag = resp.Header.Get("ETag")
 			prev.LastModified = resp.Header.Get("Last-Modified")
-			b.store.Set(namespace, prefix, prev)
+			b.storeIfCurrent(namespace, prefix, agent, prev)
 			return
 		}
-		b.store.Set(namespace, prefix, CardEntry{
+		b.storeIfCurrent(namespace, prefix, agent, CardEntry{
 			Raw:          body,
 			ETag:         resp.Header.Get("ETag"),
 			LastModified: resp.Header.Get("Last-Modified"),
@@ -142,6 +148,23 @@ func (b *Broker) refreshCard(ctx context.Context, namespace, prefix string, agen
 		b.logger.Warn("a2a card fetch non-200, keeping stale card",
 			"agent", agent.Name, "status", resp.StatusCode)
 	}
+}
+
+// storeIfCurrent writes entry to the card store only if agent is still the registered agent
+// for (namespace, prefix). A card fetch runs without the lock, so a slow fetch can complete
+// after the agent was removed or replaced (a new registration reusing the same
+// namespace-qualified prefix); without this check that stale result would clobber the current
+// agent's card. Identity is compared by card URL — stable across benign config churn, unlike
+// the agent pointer. Holding the read lock across the store write keeps the check and the write
+// atomic against SetAgents; the lock order (broker lock, then store lock) is never inverted.
+func (b *Broker) storeIfCurrent(namespace, prefix string, agent *config.A2AAgent, entry CardEntry) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	cur, ok := b.agents[namespace+"/"+prefix]
+	if !ok || cardURL(cur) != cardURL(agent) {
+		return
+	}
+	b.store.Set(namespace, prefix, entry)
 }
 
 // cardURL returns the agent's AgentCard URL: the explicit AgentCardURL override if set,
