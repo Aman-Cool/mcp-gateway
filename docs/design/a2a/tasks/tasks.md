@@ -9,9 +9,9 @@ The following primitives exist in the codebase and are reused directly by the A2
 | ext_proc Process() loop | `internal/mcp-router/server.go` | A2A traffic detection and routing |
 | ResponseBuilder | `internal/mcp-router/response_builder.go` | Building all ext_proc responses |
 | HeadersBuilder | `internal/mcp-router/headers.go` | Setting routing headers |
-| sseRewriter | `internal/mcp-router/elicitation.go` | Template for a2aSSEPassthrough |
-| idmap.Map | `internal/idmap/map.go` | Template for TaskStore (same in-memory/Redis duality) |
-| session.Cache | `internal/session/cache.go` | Extended with TaskStore methods |
+| sseRewriter | `internal/mcp-router/elicitation.go` | Template for a2aSSEObserver (read-only line reader) |
+| idmap.Map | `internal/idmap/map.go` | Template for the task-record store (same in-memory/Redis duality) |
+| session.Cache | `internal/session/cache.go` | Extended with task-record methods |
 | JWTManager.Validate() | `internal/session/jwt.go` | Session validation for A2A requests |
 | idmap Redis TTL pattern | `internal/idmap/redis.go` | Fixed safety-net TTL + explicit cleanup; the A2A task-store TTL is decoupled from JWT/session expiry, not derived from it |
 | config.Observer | `internal/config/types.go` | A2A broker registers as observer |
@@ -240,7 +240,7 @@ curl http://mcp.127-0-0-1.sslip.io:8001/.well-known/api-catalog
 
 **Acceptance criteria:**
 - [ ] `isA2A` bool set in `Process()` at `RequestHeaders` phase via `strings.HasPrefix(requestPath, "/a2a")`
-- [ ] At `RequestHeaders` phase: extract (namespace, prefix) from `:path`, call `A2ABroker.GetAgentByPath()`, set `:authority` to agent hostname + `x-a2a-agent`. Method-specific work (task-ID gen, `x-a2a-task-id`) is deferred to `RequestBody` — the JSON-RPC method is known only there
+- [ ] At `RequestHeaders` phase: extract (namespace, prefix) from `:path`, call `A2ABroker.GetAgentByPath()`, set `:authority` to agent hostname + `x-a2a-agent`. Method-specific work (ownership lookup, task-record binding) is deferred to `RequestBody` — the JSON-RPC method is known only there
 - [ ] A2A header constants defined in `internal/headers/headers.go`: `A2AAgentHeader`, `A2ATaskIDHeader`, `A2AMethodHeader`
 - [ ] `WithA2AAgent()`, `WithA2ATaskID()`, `WithA2AMethod()` added to `HeadersBuilder`
 - [ ] `x-a2a-agent` and `x-a2a-task-id` added to `internalOnlyHeaders`
@@ -269,9 +269,9 @@ make lint
 - [ ] `A2ARequest` struct: `ID any`, `JSONRPC string`, `Method string`, `Params map[string]any`
 - [ ] `parseA2ARequest(body []byte) (*A2ARequest, error)`
 - [ ] `RouteA2ARequest()`: authenticates via OAuth principal (`ExtractSubClaim`), switches on `SendMessage`/`SendStreamingMessage`/`GetTask`/`CancelTask`/`SubscribeToTask`
-- [ ] `HandleA2ATaskSend()`: generates the gateway task ID at `RequestBody`, sets `x-a2a-task-id`; `isStreamingMethod()` (`SendStreamingMessage`/`SubscribeToTask`) sets `ModeOverride`
-- [ ] Errors are `application/json` JSON-RPC (NOT SSE-framed): unknown method → `-32601`; unknown gateway task ID → `-32001 TaskNotFoundError`; missing/invalid bearer rejected by AuthPolicy at the edge, empty principal → fail closed
-- [ ] A2A spans carry `a2a.task.id` (gatewayTaskID), `a2a.method`, `a2a.agent` attributes (`a2aSpanAttributes`, analog of `spanAttributes`) so operators correlate an async task's lifecycle across separate requests; task ID is a span attribute only, never a metric label
+- [ ] `HandleA2ATaskSend()`: does not mint or rewrite any task ID (the agent assigns it); `isStreamingMethod()` (`SendStreamingMessage`/`SubscribeToTask`) sets `ModeOverride STREAMED` so the observer sees each event
+- [ ] Errors are `application/json` JSON-RPC (NOT SSE-framed): unknown method → `-32601`; an unknown task ID is **not** manufactured at the gateway — with no ownership record the call passes through and the agent returns its own `-32001 TaskNotFoundError`; missing/invalid bearer rejected by AuthPolicy at the edge, empty principal → fail closed
+- [ ] A2A spans carry `a2a.task.id` (the agent-assigned task ID), `a2a.method`, `a2a.agent` attributes (`a2aSpanAttributes`, analog of `spanAttributes`) so operators correlate an async task's lifecycle across separate requests; task ID is a span attribute only, never a metric label
 - [ ] MCP path (`/mcp` traffic) completely unaffected — regression tests pass
 - [ ] Unit tests cover all branches above
 
@@ -289,7 +289,7 @@ curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a/mcp-test/weather \
 
 ## Phase 3: Integration & Hardening (Weeks 9–12)
 
-### Task 11: Task ID Mapping
+### Task 11: Task Ownership Records
 
 *Depends on: Task 10*
 
@@ -297,22 +297,23 @@ curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a/mcp-test/weather \
 - `internal/session/cache.go`
 - `internal/session/cache_test.go`
 
-**Note:** The `a2a-task-routing-infra` branch has an existing partial implementation with a
-simpler `StoreTaskRoute(ctx, taskID, serverName string)` signature. That branch must be rebased
-onto current main and updated to use the full `TaskRoute` struct and gateway-owned task IDs
-defined here before this task merges.
+**Note:** The `a2a-task-routing-infra` branch has an existing partial implementation built for
+gateway-owned task IDs (a `StoreTaskRoute` that maps a gateway ID to an upstream ID). Under
+passthrough there is no ID mapping — task IDs are the agent's and pass through unchanged — so that
+branch is superseded: reuse only its in-memory/Redis plumbing, keyed by `(agent, taskID)` and holding
+the owning principal rather than a route.
 
 **Acceptance criteria:**
-- [ ] `taskRoutes sync.Map` field added to `Cache` (separate from `inmemory`)
-- [ ] `StoreTaskRoute(ctx, gatewayTaskID string, route TaskRoute) error` implemented for in-memory and Redis
-- [ ] `ResolveTaskRoute(ctx, gatewayTaskID string) (TaskRoute, bool, error)` implemented for in-memory and Redis
-- [ ] `DeleteTaskRoute(ctx, gatewayTaskID string) error` implemented for in-memory and Redis
+- [ ] `taskRecords sync.Map` field added to `Cache` (separate from `inmemory`), keyed by `(agent, taskID)`
+- [ ] `StoreTaskRecord(ctx, agentName, taskID string, rec TaskRecord) error` implemented for in-memory and Redis
+- [ ] `LookupTaskRecord(ctx, agentName, taskID string) (TaskRecord, bool, error)` implemented for in-memory and Redis
+- [ ] `DeleteTaskRecord(ctx, agentName, taskID string) error` implemented for in-memory and Redis
 - [ ] `SessionCache` interface in `internal/mcp-router/server.go` updated with the above signatures
-- [ ] Redis key prefix `a2atask:`, **fixed safety-net TTL decoupled from the JWT** (idmap pattern); primary cleanup via `DeleteTaskRoute()` on a terminal `TaskState`/`-32001`
-- [ ] `TaskRoute.Principal` set from the OAuth `sub`; `ResolveTaskRoute()` callers verify the requesting principal owns the task before routing
-- [ ] `HandleA2ATaskSend()` updated: generate gateway task ID, call `StoreTaskRoute()`, rewrite task ID in response body
-- [ ] `HandleA2ATaskGet()`/`HandleA2ATaskCancel()`/`SubscribeToTask` call `ResolveTaskRoute()`, verify principal ownership, find upstream agent and rewrite ID
-- [ ] Concurrency test: 100 goroutines reading and writing task routes with `-race`
+- [ ] Redis key prefix `a2atask:{agent}/{taskID}`, **fixed safety-net TTL decoupled from the JWT** (idmap pattern); primary cleanup via `DeleteTaskRecord()` on a terminal `TaskState`
+- [ ] `TaskRecord.Principal` set from the OAuth `sub`; `LookupTaskRecord()` callers verify the requesting principal owns the task (routing is by path, so the record is used for ownership only)
+- [ ] `HandleA2ATaskSend()` updated: read `result.id` from the response, call `StoreTaskRecord()` to bind ownership; the response body is forwarded unchanged (no rewrite)
+- [ ] `HandleA2ATaskGet()`/`HandleA2ATaskCancel()`/`SubscribeToTask` call `LookupTaskRecord()` and verify principal ownership; on a lookup miss the call passes through to the agent (no ID rewrite anywhere)
+- [ ] Concurrency test: 100 goroutines reading and writing task records with `-race`
 - [ ] `go test -race ./internal/session/...` passes
 
 **Verification:**
@@ -328,19 +329,18 @@ make test-unit
 *Depends on: Task 11*
 
 **Files:**
-- `internal/mcp-router/elicitation.go` (add `a2aSSEPassthrough`)
+- `internal/mcp-router/elicitation.go` (add `a2aSSEObserver`)
 - `internal/mcp-router/response_handlers.go`
 - `internal/mcp-router/server.go`
 
 **Acceptance criteria:**
-- [ ] `a2aSSEPassthrough` struct with `Process(ctx, chunk []byte) []byte` and `Flush(ctx) []byte`
-- [ ] `Process()` rewrites upstream→gateway task IDs at the streaming event envelope identity field in `data:` lines — the task `id` on the initial `task` event, `taskId` on `statusUpdate`/`artifactUpdate` (v1.0 has no `kind` discriminator; the variant is which member is present)
-- [ ] Envelope-only parsing: unmarshal the JSON-RPC envelope + result identity fields only; keep `status`/`artifact`/`history`/`parts` as `json.RawMessage` — never decode `FilePart.file.bytes`/`DataPart.data`; `history[].taskId` rewrite is a scoped replace within the history raw bytes; cost is O(envelope), not O(artifact)
+- [ ] `a2aSSEObserver` struct with `Process(ctx, chunk []byte) []byte` and `Flush(ctx) []byte`; `Process()` returns each `data:` line **unchanged** (read-only tap)
+- [ ] `Process()` reads the streaming event envelope identity field in `data:` lines — the task `id` on the initial `task` event, `taskId` on `statusUpdate`/`artifactUpdate` (v1.0 has no `kind` discriminator; the variant is which member is present) — and uses it only to `StoreTaskRecord()` on the first event and `DeleteTaskRecord()` on a terminal `TaskState`
+- [ ] Envelope-only parsing: read the JSON-RPC envelope + result identity fields only; never decode `status`/`artifact`/`history`/`parts` (incl. `FilePart.file.bytes`/`DataPart.data`); no re-marshal, so cost is O(envelope) and Part content is untouched by construction
 - [ ] `HandleResponseHeaders()` sets `ModeOverride ResponseBodyMode=STREAMED` when `isA2A && isStreamingA2AMethod()` (`SendStreamingMessage`/`SubscribeToTask`)
-- [ ] Non-streaming `SendMessage`/`GetTask` use a separate BUFFERED full-body rewrite path; an A2A flag gates `Process()` continuing into `ResponseBody` (today it only continues when `rewriter != nil`)
-- [ ] The BUFFERED override removes the `content-length` response header in the same ResponseHeaders response — the rewrite changes the body length and Envoy fails closed on the mismatch (verified against Envoy/Istio 1.27; see the design doc's SendMessage section)
-- [ ] `Process()` loop handles `a2aPassthrough` in `ResponseBody` phase like `rewriter`
-- [ ] Unit tests: SSE chunks pass through; upstream task IDs replaced with gateway task IDs; non-SSE responses unaffected
+- [ ] Non-streaming `SendMessage`/`GetTask` read `result.id` in `ResponseBody` for the ownership record, then forward the body unchanged — no BUFFERED override and no `content-length` surgery, since nothing is mutated (the buffered-rewrite path is validated and kept in reserve, not on the task path)
+- [ ] `Process()` loop invokes `a2aSSEObserver` in `ResponseBody` phase; an A2A flag gates it continuing into `ResponseBody` (today it only continues when `rewriter != nil`)
+- [ ] Unit tests: SSE chunks pass through byte-for-byte; the first-event ownership record is stored and the terminal-state record is deleted; non-SSE responses unaffected
 
 **Verification:**
 ```bash
@@ -349,7 +349,7 @@ curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
   -H "Authorization: Bearer <oauth-token>" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{...}}'
-# expect: SSE stream with gateway task IDs in all events
+# expect: SSE stream forwarded unchanged (agent-assigned task IDs intact in all events)
 ```
 
 ---
@@ -365,8 +365,8 @@ curl -X POST http://mcp.127-0-0-1.sslip.io:8001/a2a \
 
 **Acceptance criteria:**
 - [ ] Agent card discovery: `GET /.well-known/api-catalog` returns an RFC 9727 catalog (RFC 9264 Linkset) with agent links; `GET /a2a/mcp-test/weather/.well-known/agent-card.json` returns the test server's agent card served verbatim (a signed card's JWS signature intact), with the catalog link — not a rewritten card URL — routing the client to the gateway path
-- [ ] Task send: `SendMessage` to `/a2a/{namespace}/{prefix}` routes to correct upstream, returns gateway task ID
-- [ ] Task get: `GetTask` with gateway task ID returns upstream result
+- [ ] Task send: `SendMessage` to `/a2a/{namespace}/{prefix}` routes to correct upstream, returns the agent-assigned task ID unchanged
+- [ ] Task get: `GetTask` with that same task ID routes by path and returns the upstream result
 - [ ] Task cancel: `CancelTask` propagates to upstream, returns canceled state
 - [ ] Agent deregistration: deleting `A2AAgentRegistration` removes the agent from the API catalog within one reconcile cycle
 
@@ -386,7 +386,7 @@ ginkgo -v --label-filter="A2A" ./tests/e2e/...
 - `tests/e2e/a2a_task_test.go` (extend)
 
 **Acceptance criteria:**
-- [ ] Streaming: `SendStreamingMessage` delivers SSE chunks with gateway task IDs at the envelope identity field (task `id`, then `taskId` on updates)
+- [ ] Streaming: `SendStreamingMessage` delivers SSE chunks with the agent-assigned task IDs passed through unchanged (task `id`, then `taskId` on updates); a per-principal ownership record is created on the first event
 - [ ] Auth: request without a valid OAuth bearer returns 401 (AuthPolicy) before reaching upstream
 - [ ] Unknown path: `SendMessage` to unregistered `/a2a/{namespace}/{prefix}` returns JSON-RPC `-32602`
 - [ ] MCP regression: `tools/list` and `tools/call` work correctly after all A2A changes

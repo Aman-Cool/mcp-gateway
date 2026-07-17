@@ -17,39 +17,40 @@ entry should not appear until the registration is Ready.
 
 ---
 
-### [Happy,A2A] SendMessage routes to the correct upstream agent and returns a gateway task ID
+### [Happy,A2A] SendMessage routes to the correct upstream agent and passes the task ID through
 
 When a client authenticated with an OAuth bearer sends a `SendMessage` request to a registered agent's
-path (`/a2a/{namespace}/{prefix}`), the gateway should route the request to the correct upstream A2A agent,
-return a response containing a gateway-generated task ID (not the upstream's task ID), and store
-the task route mapping. The upstream agent should receive the request with the upstream task ID.
+path (`/a2a/{namespace}/{prefix}`), the gateway should route the request to the correct upstream A2A agent
+and return the response with the agent-assigned task ID **unchanged** (the gateway does not mint or
+rewrite it). The gateway should record `(agent, taskID) → principal` so later calls can be ownership-checked.
 
 ---
 
-### [Happy,A2A] GetTask resolves gateway task ID to upstream agent and returns task status
+### [Happy,A2A] GetTask routes by path and returns task status with the ID unchanged
 
-When a client sends a `GetTask` request with a gateway task ID previously returned by
-`SendMessage`, the gateway should resolve the task ID to the correct upstream agent, rewrite the
-ID to the upstream task ID, forward the request, and return the upstream result to the client
-with the gateway task ID restored in the response.
+When a client sends a `GetTask` request carrying a task ID previously returned by `SendMessage`, the
+gateway should route the request to the correct upstream agent **by path** (not by resolving the ID),
+forward the body unchanged, and return the upstream result verbatim — the task ID is identical on the
+way in and out.
 
 ---
 
 ### [Happy,A2A] CancelTask propagates to upstream and returns canceled state
 
-When a client sends a `CancelTask` request with a valid gateway task ID, the gateway should
-route the request to the correct upstream agent with the upstream task ID, and the client should
-receive a response reflecting the canceled task state.
+When a client sends a `CancelTask` request with a valid task ID, the gateway should route the request
+to the correct upstream agent by path with the task ID unchanged, and the client should receive a
+response reflecting the canceled task state.
 
 ---
 
-### [Happy,A2A] SSE streaming delivers task updates with consistent gateway task IDs
+### [Happy,A2A] SSE streaming delivers task updates with the task ID passed through unchanged
 
 When a client sends a `SendStreamingMessage` request (the v1.0 streaming method), the gateway should
-deliver SSE chunks in real time. Every `data:` event should carry the gateway task ID (not the upstream
-task ID) at its envelope identity field — the task's `id` on the initial `task` event, `taskId` on
-`statusUpdate`/`artifactUpdate` events. The stream should complete when the upstream agent sends a
-terminal state (`completed`, `failed`, `canceled`, or `rejected`).
+deliver SSE chunks in real time, each `data:` event forwarded byte-for-byte with the agent-assigned task
+ID intact at its envelope identity field — the task's `id` on the initial `task` event, `taskId` on
+`statusUpdate`/`artifactUpdate` events. The gateway should create the ownership record on the first
+event. The stream should complete when the upstream agent sends a terminal state (`completed`, `failed`,
+`canceled`, or `rejected`).
 
 ---
 
@@ -101,6 +102,15 @@ When an AuthPolicy with per-agent RBAC is attached to the `/a2a` route and a cli
 bearer whose `resource_access['a2a'].roles` does not include `agent:{namespace}/{prefix}`, Authorino
 should return 403 (using the router-set, namespace-qualified `x-a2a-agent` header) before the request
 reaches the upstream agent. A client whose token includes the role is routed normally.
+
+---
+
+### [A2ASecurity] A principal cannot GetTask or CancelTask another principal's task
+
+When principal A creates a task via `SendMessage` and principal B (a different valid bearer `sub`) sends
+a `GetTask` or `CancelTask` for that same task ID on the same agent, the gateway should reject the call
+on the ownership record (the requesting principal does not own `(agent, taskID)`) before forwarding to
+the upstream agent. Principal A performing the same call succeeds.
 
 ---
 
