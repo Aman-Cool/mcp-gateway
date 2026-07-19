@@ -310,7 +310,9 @@ the owning principal rather than a route.
 - [ ] `DeleteTaskRecord(ctx, agentName, taskID string) error` implemented for in-memory and Redis
 - [ ] `SessionCache` interface in `internal/mcp-router/server.go` updated with the above signatures
 - [ ] Redis key prefix `a2atask:{agent}/{taskID}`, **fixed retention TTL decoupled from the JWT** (idmap pattern), sized ≥ the agents' task-retention window; records are NOT deleted on terminal states (tasks stay retrievable after completion)
-- [ ] `StoreTaskRecord()` is insert-only — it never overwrites an existing record's principal
+- [ ] `StoreTaskRecord()` is insert-only via `LoadOrStore` (in-memory) / `SET NX` (Redis), returning new-insert / same-owner / different-owner / store-unavailable; the response or first task-creating event is withheld until binding succeeds
+- [ ] Parallel insert-only `(agent, contextId) -> principal` record, bound from the first task/message response or stream event; both send methods verify context ownership when a request carries a `contextId`
+- [ ] Card validation rejects non-`http(s)` scheme, non-`JSONRPC` binding, and non-v1 `protocolVersion` in addition to path and host; catalog eligibility requires a currently cached validated card
 - [ ] `TaskRecord.Principal` set from the OAuth `sub`; `LookupTaskRecord()` callers verify the requesting principal owns the task (routing is by path, so the record is used for ownership only)
 - [ ] `HandleA2ATaskSend()` updated: read `result.task.id` from the response (v1.0 `SendMessageResponse` oneof — the `result.message` variant creates no task and stores nothing), call `StoreTaskRecord()`; the response body is forwarded unchanged (no rewrite)
 - [ ] `HandleA2ATaskGet()`/`HandleA2ATaskCancel()`/`SubscribeToTask` — and sends naming an existing task — call `LookupTaskRecord()` and verify principal ownership; a missing/expired/mismatched record fails closed with `-32001` (no ID rewrite anywhere)

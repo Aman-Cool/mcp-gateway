@@ -144,6 +144,40 @@ When an authenticated client sends a `ListTasks` (or `GetExtendedAgentCard` /
 
 ---
 
+### [A2ASecurity] A continuation naming another principal's context is rejected
+
+When principal A creates a task (establishing `contextId` C) and principal B sends a `SendMessage`
+carrying `contextId` C — with or without a `taskId` — the gateway should fail closed with `-32001`
+before forwarding, because B does not own context C. Principal A continuing the same context succeeds.
+The ownership record for C is created insert-only and is not rebindable by B.
+
+---
+
+### [A2ASecurity] A card advertising a non-JSONRPC or off-gateway interface is not served
+
+When an agent's card advertises an interface with a non-`JSONRPC` binding (`GRPC`/`HTTP+JSON`), a
+non-`http(s)` scheme, a non-v1 `protocolVersion`, or a URL whose path/host is not the agent's gateway
+path, the broker should fail validation: the card is not served (503), the agent is excluded from the
+catalog, and the failure is logged. A card whose sole interface is JSONRPC at the gateway path serves
+normally.
+
+---
+
+### [A2A] A registered agent enters the catalog only once its card is validated and cached
+
+When an `A2AAgentRegistration` becomes Ready but its card has not yet been fetched, the agent should
+**not** appear in `GET /.well-known/api-catalog`; once the broker fetches and validates the card, the
+agent appears. An agent whose card later fails validation is removed from the catalog.
+
+---
+
+### [A2ASecurity] A non-v1 A2A-Version request is rejected before body parsing
+
+When a client sends an A2A request declaring a non-v1 `A2A-Version`, the gateway should reject it with
+`VersionNotSupportedError` rather than parsing ownership-sensitive fields under v1 assumptions.
+
+---
+
 ### [A2A] MCP tools/list and tools/call are unaffected by A2A changes
 
 When A2A support is fully deployed (agents registered, broker serving `/.well-known/api-catalog`,

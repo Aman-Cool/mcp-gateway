@@ -132,8 +132,11 @@ cannot invoke tasks.
   The routing, task store, and policy design are version-agnostic; the version-specific surface —
   method names (`SendMessage` etc.), the well-known path (`/.well-known/agent-card.json`), and the card shape
   (`supportedInterfaces`, named `securitySchemes`, JWS signatures) — is isolated behind one mapping.
-  The `A2A-Version` header passes through untouched — version negotiation is between client and agent;
-  the gateway parses only the fields it needs and rejects requests it cannot parse.
+  The `A2A-Version` header is forwarded to the agent (negotiation is client↔agent), but the router is
+  v1-specific and reads ownership-sensitive body fields (`taskId`, `contextId`, the response oneof), so
+  before parsing them it **guards the version**: a request that declares a non-v1 `A2A-Version` is
+  rejected with `VersionNotSupportedError` rather than parsed under v1 assumptions (a v0.3 body shape
+  differs). Absent/parse-failing bodies fail closed.
 - HTTPRoutes targeting upstream A2A agents are programmed and accepted by the gateway.
 
 ### Flow
@@ -161,6 +164,16 @@ sequenceDiagram
     Client->>Gateway: POST /a2a/mcp-test/weather (path from the catalog link)
 ```
 
+One precision on "stock client": A2A's *standard* discovery resolves a **single** agent at the
+origin-root `/.well-known/agent-card.json`. A catalog listing *many* agents under one base URL is a
+**gateway convention**, not standard stock-A2A discovery — a client must be catalog-aware to traverse it
+(fetch the catalog, follow each `href` to a per-agent card). What *is* stock is the second hop: once a
+client has an agent's gateway path, `baseURL + /.well-known/agent-card.json` resolves this design's card
+location with no configuration (verified against the reference `a2a-go` resolver). So the gateway is
+stock-compatible for *per-agent* discovery and invocation; only *multi-agent enumeration* needs
+catalog-awareness. Per RFC 9727 the catalog endpoint should also answer `HEAD` and advertise the
+`profile` link parameter — small conformance details folded into the serving implementation.
+
 A stock A2A v1.0 client discovers agents via the catalog, then — per the spec's interface-selection
 rules — invokes each agent at the `url` of an interface in that agent's AgentCard `supportedInterfaces[]`.
 A catalog link alone cannot override that choice (the catalog is discovery metadata, not a routing
@@ -170,12 +183,15 @@ spec reading — the reference `a2a-go` client behaves exactly this way: it bind
 `supportedInterfaces` (and errors when its endpoint leaves the list), and its default card resolution
 appends `/.well-known/agent-card.json` to the base URL, so a stock client pointed at an agent's gateway
 path resolves this design's card location with no configuration. The gateway fronts only the JSONRPC
-binding, so validation covers **every** `supportedInterfaces[]` entry — an interface under any other
-binding (`GRPC`, `HTTP+JSON`) pointing at the upstream would be an unpoliced bypass, and the reference
-client's transport selection actively picks among all advertised bindings by preference and semver
-compatibility, so a stray direct-upstream `GRPC` entry would be *selected*, not ignored — and the
-interface `tenant`, which a client echoes in requests and must be consistent with the gateway's
-routing. That drives the card-serving contract:
+binding, so validation checks **every** `supportedInterfaces[]` entry (`internal/a2a/validate.go`) —
+each must use an `http(s)` scheme, resolve to the agent's gateway path and host, declare the `JSONRPC`
+binding, and carry a v1 `protocolVersion`. An interface under any other binding (`GRPC`, `HTTP+JSON`) is
+rejected outright, because the reference client's transport selection actively picks among advertised
+bindings by preference and semver compatibility, so a stray direct-upstream `GRPC` entry would be
+*selected*, not ignored. Two checks are deliberately out of the broker's scope: the external **port and
+`https` scheme** belong to the gateway listener (the broker doesn't know its own external scheme or
+port), and **`tenant` consistency** is enforced at request time by the router, not at card validation.
+That drives the card-serving contract:
 
 - **Unsigned cards** — the broker rewrites the interface URL to the gateway path before serving (safe;
   no signature to break). This is the transparent-insertion trick that worked for v0.3.
@@ -183,12 +199,23 @@ routing. That drives the card-serving contract:
   rewrite the interface URL without invalidating the signature. The card must therefore be signed to
   **already advertise the gateway URL**: the upstream (or the operator at registration) signs a card
   whose JSONRPC interface is the agent's gateway path, and the broker serves it verbatim, signature
-  intact, so the client can still verify against the agent's key.
+  intact, so the client can still verify against the agent's key. A signed interface URL names a single
+  origin, so a signed card is inherently **single-gateway** — one signed card cannot simultaneously
+  validate against two gateways' public hosts. Multi-gateway exposure of the same agent therefore needs
+  either a per-gateway signed card, gateway re-signing (out of scope — makes the gateway a trust
+  authority), or a one-public-origin deployment. Note also that a verbatim card's `securitySchemes`
+  describe authenticating to the **advertised interface**; when the gateway enforces its own OAuth /
+  AuthPolicy on `/a2a`, an upstream-oriented scheme on the card is advisory, and the gateway's policy is
+  the boundary a client actually meets (see [Upstream Authentication](#upstream-authentication)).
 - **Signed card advertising a direct-upstream URL** — a misconfiguration, not a supported mode: served
   verbatim it would send clients straight to the agent, outside the policy perimeter. The broker
-  validates the advertised interface against the expected gateway path on card refresh and, on mismatch,
-  **fails closed** — the agent is marked not-`Ready` and never enters the catalog, rather than silently
-  leaking a bypass.
+  validates the advertised interfaces against the expected gateway path on card refresh and, on mismatch,
+  **fails closed** — the broker drops the cached card and excludes the agent from the catalog (a
+  broker-local *catalog-ineligible* state; the broker has no channel to the CRD's `Ready` condition, so
+  this is distinct from controller readiness — see [Component Responsibilities](#component-responsibilities)),
+  rather than silently leaking a bypass. **Catalog eligibility means a validated card is cached now**: an
+  agent whose card failed validation, or whose card has not been fetched yet, is not listed, so the
+  catalog never advertises a path whose card GET would fail.
 
 agentgateway (Solo.io, now under the Linux Foundation) uses per-agent routing similarly. Multi-agent
 discovery under one base URL has since begun to settle upstream: the A2A project closed its
@@ -416,7 +443,7 @@ stateDiagram-v2
 | Component | Responsibility |
 |---|---|
 | Controller (`A2AReconciler`) | Watches `A2AAgentRegistration` CRDs. Resolves HTTPRoute → upstream endpoint → agent card URL. Writes `A2AAgent` config to the config Secret. Sets a `Ready` status condition (`Ready` = config written, mirroring `MCPServerRegistration` — no discovered-content in status). |
-| Broker (`a2a.Broker`) | Implements `config.Observer`. On config change, calls `SetAgents()`. `ServeAPICatalog()` serves `GET /.well-known/api-catalog` as an RFC 9264 Linkset (`Content-Type: application/linkset+json`, registered by RFC 9727) listing all enabled agent endpoints. `ServeAgentCard(namespace, prefix)` serves `GET /a2a/{namespace}/{prefix}/.well-known/agent-card.json` from a cached, ticker-refreshed copy of the upstream card (mirroring `MCPManager`; not a per-request proxy). Signed cards are served **verbatim** (a rewrite would invalidate the JWS signature) and MUST already advertise the gateway path; the broker validates **every** advertised interface (all bindings, plus the interface `tenant`) on refresh and **fails closed** (agent not-`Ready`) on mismatch, so a signed card can't leak a gateway bypass through any interface entry. Unsigned cards have their interface URL rewritten to the gateway path (see [Discovery Flow](#flow) for the full contract). `GetAgentByPath(namespace, prefix)` resolves a namespace-qualified path to the upstream agent. |
+| Broker (`a2a.Broker`) | Implements `config.Observer`. On config change, calls `SetAgents()`. `ServeAPICatalog()` serves `GET /.well-known/api-catalog` as an RFC 9264 Linkset (`Content-Type: application/linkset+json`, registered by RFC 9727) listing all enabled agent endpoints. `ServeAgentCard(namespace, prefix)` serves `GET /a2a/{namespace}/{prefix}/.well-known/agent-card.json` from a cached, ticker-refreshed copy of the upstream card (mirroring `MCPManager`; not a per-request proxy). Signed cards are served **verbatim** (a rewrite would invalidate the JWS signature) and MUST already advertise the gateway path; the broker validates **every** advertised interface (scheme, gateway path, host, `JSONRPC` binding, v1 `protocolVersion`) on refresh and **fails closed** on mismatch — it drops the cached card and excludes the agent from the catalog (a broker-local *catalog-ineligible* state, **not** the CRD `Ready` condition: the broker is a read-only config observer with no status channel to the controller). Catalog eligibility means a validated card is cached now, so a not-yet-fetched or failed agent is never listed. Unsigned cards may have their interface URL rewritten to the gateway path (see [Discovery Flow](#flow) for the full contract). `GetAgentByPath(namespace, prefix)` resolves a namespace-qualified path to the upstream agent. |
 | Router (`ExtProcServer`) | At the `RequestHeaders` phase: detects A2A traffic by `:path` prefix. GET **discovery** requests (the card and catalog paths) also traverse ext_proc — the filter is listener-scoped — and the router passes them through untouched; the broker's HTTP mux serves them. For POST **invocation** traffic it extracts the `(namespace, prefix)` from `:path`, calls `A2ABroker.GetAgentByPath()`, sets `:authority` to the resolved agent hostname and the `x-a2a-agent` header. The JSON-RPC method is not known until the body, so **all method-specific work happens at `RequestBody`**, not here. At the `RequestBody` phase: authenticates via the OAuth principal (`sub`, read with `ExtractSubClaim`); for `GetTask`/`CancelTask`/`SubscribeToTask` — and for `SendMessage`/`SendStreamingMessage` continuations whose `message.taskId` or `referenceTaskIds` name an existing task — reads the agent-assigned task ID from the body (unchanged), calls `LookupTaskRecord()`, and verifies the principal owns the task; a missing, expired, or mismatched record **fails closed** with `-32001 TaskNotFoundError`. Deferred v1.0 methods (`ListTasks` etc.) are rejected with `-32004`, never forwarded. Request bodies are **never rewritten** — task IDs pass through, so routing is by `:path` alone. At the `ResponseHeaders` phase: sets a `ModeOverride` when `status == 200` — `STREAMED` for `SendStreamingMessage`/`SubscribeToTask` so the observer sees each event, `BUFFERED` for `SendMessage` so the router sees the response at all (the filter's default `response_body_mode` is `NONE`); observation-only, so no `content-length` change is needed. `GetTask`/`CancelTask` need no override (bare-`Task` responses, nothing to observe). At the `ResponseBody` phase: for `SendMessage`, reads `result.task.id` (the v1.0 `SendMessageResponse` oneof; the `result.message` variant creates no task and stores nothing) and calls `StoreTaskRecord()` — **insert-only**, never rebinding an existing owner — then forwards the body byte-for-byte. `a2aSSEObserver.Process()` handles streaming read-only: on the first `task` event it calls `StoreTaskRecord()` (insert-only) and it forwards every `data:` line unchanged; terminal states end the stream without deleting the record — parsing only the present union member's identity fields, with `parts` (incl. base64 file bytes) never decoded (see [SSE artifact passthrough](#sse-artifact-passthrough--envelope-only-parsing)). |
 | Config (`MCPServersConfig`) | Stores `A2AAgents []*A2AAgent` alongside `Servers`. `SetA2AAgents()`, `ListA2AAgents()` provide thread-safe access under the existing `sync.RWMutex`. `Notify()` delivers A2A agent list to observers. |
 | Config Secret (`SecretReaderWriter`) | `UpsertA2AAgent()` and `RemoveA2AAgent()` follow the existing read-modify-write pattern with `retry.RetryOnConflict()`. `BrokerConfig` YAML gains an `a2aAgents` key. |
@@ -540,8 +567,14 @@ DeleteTaskRecord(ctx context.Context, agentName, taskID string) error
 ```
 
 In-memory: new `taskRecords sync.Map` field on `Cache`, separate from `inmemory` to avoid type
-collision. No COW needed — values are immutable `TaskRecord` structs stored and replaced atomically
-via `sync.Map.Store`, unlike the `inmemory` map whose values are `map[string]string` requiring COW.
+collision. No COW needed — values are immutable `TaskRecord` structs. Insert-only means the write is
+`sync.Map.LoadOrStore` (**not** `Store`, which would overwrite): `LoadOrStore` returns the existing
+record if one is already bound, so `StoreTaskRecord` reports one of three outcomes — **new insert**,
+**same-owner idempotent** (a retried request from the owning principal), or **different-owner collision**
+(fail closed) — and the ownership binding is decided by the store, not by a check-then-write that could
+race. The Redis analog is `SET NX` (plus the TTL); a store error is a fourth outcome, **store
+unavailable**, which also fails closed — the task response or first task-creating stream event is **not
+released to the client until the binding has succeeded**, so a task can never be handed back unowned.
 
 Redis: key `a2atask:{agent}/{taskID}`, with a **fixed retention TTL decoupled from the session JWT**
 (the `idmap` pattern — `idmap/redis.go`; a TTL, not a session-derived expiry). A2A tasks can run for
@@ -613,6 +646,18 @@ principal, never a client-asserted one. The principal is today the bare token `s
 `ExtractSubClaim` usage across the gateway; scoping to `(issuer, sub)` for multi-issuer deployments is
 a gateway-wide follow-up, tracked once, not an A2A-only divergence.
 
+**Context ownership.** A2A conversations span multiple tasks under a shared `contextId`, and the spec
+lets a `SendMessage` carry a `contextId` **without** a `taskId` to start a new task within an existing
+context (and a `result.message` reply can establish a context with no task at all). Task-level ownership
+alone would leave a hole: a principal who learns another principal's `contextId` could inject into or
+continue that conversation. The gateway therefore keeps a **parallel insert-only `(agent, contextId) →
+principal` record**, bound from the `contextId` on the first `task`/`message` response or stream event,
+and both send methods verify context ownership whenever a request carries a `contextId` — same
+fail-closed `-32001`, same retention semantics. `contextId`, like `taskId`, is agent-assigned and passes
+through unchanged; the record is an ownership check, not a rewrite. (An agent that never surfaces cross-task
+context history bounds the impact, but the gateway cannot assume that, so it enforces context ownership
+regardless.)
+
 **Internal header stripping.** `x-a2a-agent` and `x-a2a-task-id` are stripped at both the
 HTTPRoute level (via `RequestHeaderModifier` filter in `buildGatewayHTTPRoute()`) and in
 `internalOnlyHeaders` in the router. A client cannot inject these headers to influence routing.
@@ -620,7 +665,12 @@ HTTPRoute level (via `RequestHeaderModifier` filter in `buildGatewayHTTPRoute()`
 **Agent card credential isolation.** `credentialRef` on `A2AAgentRegistration` is used exclusively
 by the controller to fetch Agent Cards for registration validation. It is never injected into
 client `SendMessage` requests. The same authentication separation applies as with
-`MCPServerRegistration.credentialRef`.
+`MCPServerRegistration.credentialRef`. The config Secret carries these discovery credentials (and the
+per-agent CA) for the **broker**, which is also read by the router process; since the router has no
+reason to see them, the credential boundary is preserved by the router consuming a **sanitized routing
+view** (agent name, hostname, path — no `credential`/`caCert`) rather than the raw discovery config, so a
+router-side bug can't surface a broker-only secret. This mirrors MCP, where the router likewise never
+receives `credentialRef`.
 
 **Cross-namespace prefix collision — solved by namespace-qualified paths.** `A2AAgentRegistrations`
 from multiple namespaces are aggregated into one gateway's config (mirroring `MCPServerRegistration`,
@@ -657,7 +707,15 @@ policy *attachment* point, so every agent would share one policy rather than eac
 
 An operator attaches an `AuthPolicy` as for MCP (`config/e2e/auth/mcps-auth-policy.yaml`).
 Authentication validates the OAuth2/OIDC bearer; authorization enforces **per-agent** RBAC using the
-router-set `x-a2a-agent` header, analogous to MCP's per-tool check on `x-mcp-toolname`:
+router-set `x-a2a-agent` header, analogous to MCP's per-tool check on `x-mcp-toolname`.
+
+One routing caveat the policy author must know: the generated HTTPRoute currently serves public **card
+GET** discovery and authenticated **invocation POST** under the *same* `a2a` rule (`sectionName: a2a`),
+so an `AuthPolicy` targeting that section would also gate public discovery — a client couldn't fetch a
+card without a bearer. Discovery is meant to be public (the card is public metadata; the *invocation* is
+what needs auth). The AuthPolicy should therefore scope to POST — via a `method` predicate in the policy,
+or a route split that puts card GETs on their own rule — so authentication lands on invocation, not on
+reading the card. The example below adds the method predicate.
 
 ```yaml
 apiVersion: kuadrant.io/v1
@@ -674,11 +732,14 @@ spec:
   rules:
     authentication:
       keycloak:
+        when:
+          - predicate: "request.method == 'POST'"   # invocation only; leave card GET discovery public
         jwt:
           issuerUrl: https://keycloak.example.com/realms/agents
     authorization:
       agent-access-check:
         when:
+          - predicate: "request.method == 'POST'"
           - predicate: "request.headers.exists(h, h == 'x-a2a-agent')"
         patternMatching:
           patterns:
@@ -834,7 +895,7 @@ The routing indirection lives in discovery, not in the card: the gateway routes 
 dependency on client behavior: per the [discovery contract](#flow), the broker validates **every**
 advertised interface on refresh — any entry, under any binding (`JSONRPC`, `GRPC`, `HTTP+JSON`), whose
 URL does not resolve to the gateway path, or whose `tenant` is inconsistent with the gateway's routing,
-**fails closed** (the agent is not-`Ready` and never enters the catalog). A signed card must therefore be
+**fails closed** (the broker excludes the agent from the catalog — a catalog-ineligible state, not the CRD `Ready` condition). A signed card must therefore be
 signed already advertising the gateway endpoint. For **unsigned** cards the broker may still rewrite the
 interface URL as a convenience, but the contract does not depend on it.
 
