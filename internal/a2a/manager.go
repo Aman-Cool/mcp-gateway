@@ -51,12 +51,13 @@ func (b *Broker) refreshAll(ctx context.Context) {
 	}
 }
 
-// refreshNewCards fetches, in the background, the cards for agents that have no cached entry
-// yet — a newly-registered agent, most often. Without this a new agent's card is unavailable
-// until the next refresh tick (up to the ticker interval); this makes it available promptly.
-// Only uncached agents are fetched, so a config change never re-fetches the whole set, and the
-// fetches run sequentially in a single goroutine to avoid a burst against upstreams.
-func (b *Broker) refreshNewCards(agents map[string]*config.A2AAgent) {
+// refreshNewCards fetches, in the background, the cards for agents that have no cached
+// entry yet — a newly-registered agent, most often — and for cached agents whose fetch
+// inputs changed (card URL, credential, or CA), so a re-pointed or re-keyed agent doesn't
+// keep serving its old card until the next refresh tick. Unchanged cached agents are never
+// re-fetched, so a config change doesn't re-fetch the whole set, and the fetches run
+// sequentially in a single goroutine to avoid a burst against upstreams.
+func (b *Broker) refreshNewCards(prev, agents map[string]*config.A2AAgent) {
 	type target struct {
 		namespace, prefix string
 		agent             *config.A2AAgent
@@ -64,9 +65,13 @@ func (b *Broker) refreshNewCards(agents map[string]*config.A2AAgent) {
 	var pending []target
 	for key, agent := range agents {
 		namespace, prefix, _ := strings.Cut(key, "/")
-		if _, ok := b.store.Get(namespace, prefix); !ok {
-			pending = append(pending, target{namespace, prefix, agent})
+		if _, cached := b.store.Get(namespace, prefix); cached {
+			old, existed := prev[key]
+			if !existed || !fetchInputsChanged(old, agent) {
+				continue
+			}
 		}
+		pending = append(pending, target{namespace, prefix, agent})
 	}
 	if len(pending) == 0 {
 		return
@@ -201,6 +206,15 @@ func (b *Broker) failCardValidation(namespace, prefix string, agent *config.A2AA
 	b.store.Delete(namespace, prefix)
 	b.logger.Warn("a2a card failed validation, agent excluded from discovery",
 		"agent", agent.Name, "reason", reason)
+}
+
+// fetchInputsChanged reports whether the inputs that shape a card fetch differ between two
+// snapshots of the same agent: the effective card URL (endpoint or agentCardURL override),
+// the discovery credential, or the per-agent CA.
+func fetchInputsChanged(old, cur *config.A2AAgent) bool {
+	return cardURL(old) != cardURL(cur) ||
+		old.Credential != cur.Credential ||
+		old.CACert != cur.CACert
 }
 
 // cardURL returns the agent's AgentCard URL: the explicit AgentCardURL override if set,
