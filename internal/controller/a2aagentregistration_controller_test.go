@@ -104,6 +104,15 @@ func TestA2AReferencesSecret(t *testing.T) {
 	if a2aReferencesSecret(mcpv1alpha1.A2AAgentRegistrationSpec{}, "agent-secret") {
 		t.Error("expected spec without credentialRef not to match")
 	}
+	withCARef := mcpv1alpha1.A2AAgentRegistrationSpec{
+		CACertSecretRef: &mcpv1alpha1.CACertSecretReference{Name: "agent-ca"},
+	}
+	if !a2aReferencesSecret(withCARef, "agent-ca") {
+		t.Error("expected spec referencing the CA secret to match")
+	}
+	if a2aReferencesSecret(withCARef, "other-secret") {
+		t.Error("expected CA spec not to match other-secret")
+	}
 }
 
 func TestA2AGetTargetHTTPRouteUsesTargetRefNamespace(t *testing.T) {

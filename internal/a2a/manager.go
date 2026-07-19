@@ -103,7 +103,12 @@ func (b *Broker) refreshCard(ctx context.Context, namespace, prefix string, agen
 		}
 	}
 
-	resp, err := b.client.Do(req)
+	client, err := b.clientFor(namespace+"/"+prefix, agent)
+	if err != nil {
+		b.logger.Warn("a2a card client build failed, keeping stale card", "agent", agent.Name, "error", err)
+		return
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		b.logger.Warn("a2a card fetch failed, keeping stale card", "agent", agent.Name, "error", err)
 		return

@@ -42,6 +42,42 @@ func readLabeledCredential(ctx context.Context, reader client.Reader, namespace,
 	return string(val), nil
 }
 
+// readLabeledCACert reads and validates a PEM-encoded CA certificate bundle from a
+// labeled secret, enforcing the managed-secret label, a size cap, and PEM validity.
+// Shared by the MCPServerRegistration and A2AAgentRegistration reconcilers; takes the
+// secret name and key directly so it is agnostic to the API version of the reference.
+func readLabeledCACert(ctx context.Context, reader client.Reader, namespace, name, key string) (string, error) {
+	caSecret := &corev1.Secret{}
+	err := reader.Get(ctx, types.NamespacedName{
+		Name:      name,
+		Namespace: namespace,
+	}, caSecret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("CA certificate secret %s not found", name)
+		}
+		return "", fmt.Errorf("failed to get CA certificate secret: %w", err)
+	}
+	if caSecret.Labels == nil || caSecret.Labels[ManagedSecretLabel] != ManagedSecretValue {
+		return "", fmt.Errorf("CA certificate secret %s is missing required label %s=%s",
+			name, ManagedSecretLabel, ManagedSecretValue)
+	}
+	if key == "" {
+		key = "ca.crt"
+	}
+	val, ok := caSecret.Data[key]
+	if !ok {
+		return "", fmt.Errorf("CA certificate secret %s missing key %s", name, key)
+	}
+	if len(val) > maxCACertSize {
+		return "", fmt.Errorf("CA certificate data in secret %s exceeds maximum size (%d bytes)", name, maxCACertSize)
+	}
+	if err := validateCACertPEM(val); err != nil {
+		return "", fmt.Errorf("CA certificate in secret %s is invalid: %w", name, err)
+	}
+	return string(val), nil
+}
+
 // applyReadyCondition updates or appends the Ready condition, preserving
 // LastTransitionTime when the status itself did not flip (True<->False), and reports
 // whether anything changed so callers can skip no-op status updates that would

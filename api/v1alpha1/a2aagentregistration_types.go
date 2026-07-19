@@ -68,6 +68,14 @@ type A2AAgentRegistrationSpec struct {
 	// +optional
 	CredentialRef *SecretReference `json:"credentialRef,omitempty"`
 
+	// caCertSecretRef references a Secret containing a PEM-encoded CA certificate bundle.
+	// The broker uses this CA to verify TLS connections to the upstream A2A agent when
+	// fetching its card. When set, the agent endpoint is upgraded to https.
+	// The referenced Secret must have the label mcp.kuadrant.io/secret=true.
+	// If key is not specified, defaults to "ca.crt".
+	// +optional
+	CACertSecretRef *CACertSecretReference `json:"caCertSecretRef,omitempty"`
+
 	// state dictates whether the broker should serve and route to this agent.
 	// When set to Disabled, the agent is removed from the API catalog and requests
 	// to its path prefix are no longer routed. The agent can be re-enabled at any

@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -159,6 +161,7 @@ func (r *A2AReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 
 	// collect namespaces of valid MCPGatewayExtensions whose listener the route attaches to
 	validNamespaces := []string{}
+	hasGatewayCACertBundle := false
 	for _, vg := range validGateways {
 		mcpGatewayExtensions, err := r.MCPExtFinderValidator.FindValidMCPGatewayExtsForGateway(ctx, vg)
 		if err != nil {
@@ -170,6 +173,9 @@ func (r *A2AReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 					"extension", vext.Name, "namespace", vext.Namespace, "sectionName", vext.Spec.TargetRef.SectionName)
 				continue
 			}
+			if vext.Spec.CACertBundleRef != nil {
+				hasGatewayCACertBundle = true
+			}
 			validNamespaces = append(validNamespaces, vext.Namespace)
 		}
 	}
@@ -179,7 +185,7 @@ func (r *A2AReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 		return result, err
 	}
 
-	agentConfig, err := r.buildA2AAgentConfig(ctx, targetRoute, a2areg)
+	agentConfig, err := r.buildA2AAgentConfig(ctx, targetRoute, a2areg, hasGatewayCACertBundle)
 	if err != nil {
 		return r.failStatus(ctx, a2areg, err.Error(), err)
 	}
@@ -364,7 +370,7 @@ func (r *A2AReconciler) getTargetHTTPRoute(ctx context.Context, a2areg *mcpv1alp
 // buildA2AAgentConfig derives the broker config entry for a registration. The endpoint
 // carries no path: the A2A endpoint and well-known card paths are protocol-defined, and
 // agentCardURL overrides the card fetch location when set.
-func (r *A2AReconciler) buildA2AAgentConfig(ctx context.Context, targetRoute *gatewayv1.HTTPRoute, a2areg *mcpv1alpha1.A2AAgentRegistration) (*config.A2AAgent, error) {
+func (r *A2AReconciler) buildA2AAgentConfig(ctx context.Context, targetRoute *gatewayv1.HTTPRoute, a2areg *mcpv1alpha1.A2AAgentRegistration, hasGatewayCACertBundle bool) (*config.A2AAgent, error) {
 	if a2areg.DeletionTimestamp != nil {
 		return nil, fmt.Errorf("cant generate config for deleting agent %s/%s", a2areg.Namespace, a2areg.Name)
 	}
@@ -373,9 +379,23 @@ func (r *A2AReconciler) buildA2AAgentConfig(ctx context.Context, targetRoute *ga
 		return nil, err
 	}
 
+	// if a CA cert is configured (per-agent or gateway-level), the upstream must be HTTPS,
+	// mirroring MCPServerRegistration. agentCardURL is operator-explicit and never rewritten.
+	endpoint := serverInfo.Endpoint
+	if a2areg.Spec.CACertSecretRef != nil || hasGatewayCACertBundle {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse endpoint URL %q: %w", endpoint, err)
+		}
+		if strings.EqualFold(u.Scheme, "http") {
+			u.Scheme = "https"
+			endpoint = u.String()
+		}
+	}
+
 	agentConfig := config.A2AAgent{
 		Name:         a2aAgentName(a2areg),
-		URL:          serverInfo.Endpoint,
+		URL:          endpoint,
 		Hostname:     serverInfo.Hostname,
 		AgentPrefix:  a2areg.Spec.AgentPrefix,
 		AgentCardURL: a2areg.Spec.AgentCardURL,
@@ -390,6 +410,16 @@ func (r *A2AReconciler) buildA2AAgentConfig(ctx context.Context, targetRoute *ga
 			return nil, err
 		}
 		agentConfig.Credential = credential
+	}
+
+	// per-agent CA for verifying the upstream's TLS cert on card fetches; validated here
+	// so a broken bundle surfaces on the registration instead of failing silently at fetch time
+	if a2areg.Spec.CACertSecretRef != nil {
+		caCert, err := readLabeledCACert(ctx, r.DirectAPIReader, a2areg.Namespace, a2areg.Spec.CACertSecretRef.Name, a2areg.Spec.CACertSecretRef.Key)
+		if err != nil {
+			return nil, err
+		}
+		agentConfig.CACert = caCert
 	}
 
 	return &agentConfig, nil
@@ -557,7 +587,8 @@ func (r *A2AReconciler) findA2AAgentRegistrationsForSecret(ctx context.Context, 
 
 // a2aReferencesSecret checks whether an A2AAgentRegistration references the named secret
 func a2aReferencesSecret(spec mcpv1alpha1.A2AAgentRegistrationSpec, secretName string) bool {
-	return spec.CredentialRef != nil && spec.CredentialRef.Name == secretName
+	return (spec.CredentialRef != nil && spec.CredentialRef.Name == secretName) ||
+		(spec.CACertSecretRef != nil && spec.CACertSecretRef.Name == secretName)
 }
 
 // findA2AAgentRegistrationsForMCPGatewayExtension finds all A2AAgentRegistrations whose HTTPRoutes

@@ -9,6 +9,7 @@ type A2AAgent struct {
 	Auth         *AuthConfig `json:"auth,omitempty"         yaml:"auth,omitempty"`
 	Credential   string      `json:"credential,omitempty"   yaml:"credential,omitempty"`
 	AgentCardURL string      `json:"agentCardURL,omitempty" yaml:"agentCardURL,omitempty"`
+	CACert       string      `json:"caCert,omitempty"       yaml:"caCert,omitempty"`
 	State        string      `json:"state"                  yaml:"state"`
 }
 
@@ -23,6 +24,7 @@ func (agent A2AAgent) ConfigChanged(existingConfig A2AAgent) bool {
 		existingConfig.AgentPrefix != agent.AgentPrefix ||
 		existingConfig.Credential != agent.Credential ||
 		existingConfig.AgentCardURL != agent.AgentCardURL ||
+		existingConfig.CACert != agent.CACert ||
 		normalizeState(existingConfig.State) != normalizeState(agent.State)
 }
 

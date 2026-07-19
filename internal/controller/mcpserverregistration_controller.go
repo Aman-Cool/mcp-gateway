@@ -397,38 +397,11 @@ func (r *MCPReconciler) buildMCPServerConfig(ctx context.Context, targetRoute *g
 	}
 
 	if mcpsr.Spec.CACertSecretRef != nil {
-		caSecret := &corev1.Secret{}
-		err := r.DirectAPIReader.Get(ctx, types.NamespacedName{
-			Name:      mcpsr.Spec.CACertSecretRef.Name,
-			Namespace: mcpsr.Namespace,
-		}, caSecret)
+		caCert, err := readLabeledCACert(ctx, r.DirectAPIReader, mcpsr.Namespace, mcpsr.Spec.CACertSecretRef.Name, mcpsr.Spec.CACertSecretRef.Key)
 		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("CA certificate secret %s not found", mcpsr.Spec.CACertSecretRef.Name)
-			}
-			return nil, fmt.Errorf("failed to get CA certificate secret: %w", err)
+			return nil, err
 		}
-
-		if caSecret.Labels == nil || caSecret.Labels[ManagedSecretLabel] != ManagedSecretValue {
-			return nil, fmt.Errorf("CA certificate secret %s is missing required label %s=%s",
-				mcpsr.Spec.CACertSecretRef.Name, ManagedSecretLabel, ManagedSecretValue)
-		}
-
-		key := mcpsr.Spec.CACertSecretRef.Key
-		if key == "" {
-			key = "ca.crt"
-		}
-		val, ok := caSecret.Data[key]
-		if !ok {
-			return nil, fmt.Errorf("CA certificate secret %s missing key %s", mcpsr.Spec.CACertSecretRef.Name, key)
-		}
-		if len(val) > maxCACertSize {
-			return nil, fmt.Errorf("CA certificate data in secret %s exceeds maximum size (%d bytes)", mcpsr.Spec.CACertSecretRef.Name, maxCACertSize)
-		}
-		if err := validateCACertPEM(val); err != nil {
-			return nil, fmt.Errorf("CA certificate in secret %s is invalid: %w", mcpsr.Spec.CACertSecretRef.Name, err)
-		}
-		serverConfig.CACert = string(val)
+		serverConfig.CACert = caCert
 	}
 
 	return &serverConfig, nil
