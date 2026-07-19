@@ -21,6 +21,7 @@
 | `agentPrefix` | String | Yes | URL path segment that routes requests to this agent. Requests to `/a2a/{agentPrefix}` are routed to the agent referenced by `targetRef`, and the agent's card is served at `/a2a/{agentPrefix}/.well-known/agent-card.json`. Must match `^[a-z0-9][a-z0-9_]*$`. Immutable once set |
 | `agentCardURL` | String | No | Overrides the URL the broker fetches the agent card from. If not specified, the card is fetched from the agent's well-known card path derived from the `targetRef` backend. Must match `^https?://` |
 | `credentialRef` | [SecretReference](#secretreference) | No | Reference to a Secret containing authentication credentials used exclusively by the broker for agent card discovery. Never injected into client `message/send` or `tasks/*` requests. The secret must have the label `mcp.kuadrant.io/secret=true` |
+| `caCertSecretRef` | [CACertSecretReference](#cacertsecretreference) | No | Reference to a Secret containing a PEM-encoded CA certificate bundle used to verify TLS connections to the upstream agent when fetching its card. When set, the agent endpoint is upgraded to `https`. The secret must have the label `mcp.kuadrant.io/secret=true` |
 | `state` | String | No | Desired operational state of the agent. Enum: `Enabled` (default), `Disabled`. When set to `Disabled`, the agent is removed from the API catalog and requests to its path prefix are no longer routed. The agent can be re-enabled at any time by setting this field back to `Enabled` |
 
 ## TargetReference
@@ -38,6 +39,13 @@
 |-----------|----------|:------------:|-----------------|
 | `name` | String | Yes | Name of the Secret resource |
 | `key` | String | No | Key within the Secret that contains the credential value. Default: `token` |
+
+## CACertSecretReference
+
+| **Field** | **Type** | **Required** | **Description** |
+|-----------|----------|:------------:|-----------------|
+| `name` | String | Yes | Name of the Secret resource |
+| `key` | String | No | Key within the Secret that contains the CA certificate PEM data. Default: `ca.crt` |
 
 ## A2AAgentRegistrationStatus
 

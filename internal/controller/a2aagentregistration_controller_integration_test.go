@@ -623,6 +623,87 @@ var _ = Describe("A2AAgentRegistration Controller", func() {
 		})
 	})
 
+	Context("When the registration has a caCertSecretRef", func() {
+		const caSecretName = "a2a-agent-ca"
+
+		BeforeEach(setupGatewayFixtures)
+		AfterEach(func() {
+			teardownGatewayFixtures()
+			_ = client.IgnoreNotFound(testK8sClient.Delete(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: caSecretName, Namespace: "default"},
+			}))
+		})
+
+		createCASecret := func(labeled bool, data []byte) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: caSecretName, Namespace: "default"},
+				Data:       map[string][]byte{"ca.crt": data},
+			}
+			if labeled {
+				secret.Labels = map[string]string{"mcp.kuadrant.io/secret": "true"}
+			}
+			Expect(testK8sClient.Create(ctx, secret)).To(Succeed())
+		}
+
+		newRegistrationWithCA := func() *mcpv1alpha1.A2AAgentRegistration {
+			a2areg := createTestA2AAgentRegistration(resourceName, "default", httpRouteName, "weather")
+			a2areg.Spec.CACertSecretRef = &mcpv1alpha1.CACertSecretReference{Name: caSecretName}
+			return a2areg
+		}
+
+		// a failing build returns a reconcile error by design, so drive reconciles
+		// without asserting on the error and probe the status condition instead
+		expectNotReadyAndNoConfig := func(configWriter *mockA2AConfigReaderWriter, reconciler *A2AReconciler) {
+			Eventually(func(g Gomega) {
+				_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: a2aNamespacedName})
+				updated := &mcpv1alpha1.A2AAgentRegistration{}
+				g.Expect(testK8sClient.Get(ctx, a2aNamespacedName, updated)).To(Succeed())
+				ready := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(ready.Reason).To(Equal(conditionReasonNotReady))
+			}, testTimeout, testRetryInterval).Should(Succeed())
+			Expect(configWriter.upsertedAgents).To(BeEmpty())
+		}
+
+		It("includes the CA cert in config and upgrades the endpoint to https", func() {
+			createCASecret(true, generateIntegrationTestCACertPEM())
+			Expect(testK8sClient.Create(ctx, newRegistrationWithCA())).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+
+			reconcileA2AUntil(ctx, reconciler, a2aNamespacedName, func(g Gomega) {
+				g.Expect(configWriter.upsertedAgents).NotTo(BeEmpty())
+			})
+			for _, agent := range configWriter.upsertedAgents {
+				Expect(agent.CACert).To(ContainSubstring("BEGIN CERTIFICATE"))
+				Expect(agent.URL).To(HavePrefix("https://"))
+			}
+		})
+
+		It("fails the registration when the CA secret lacks the required label", func() {
+			createCASecret(false, generateIntegrationTestCACertPEM())
+			Expect(testK8sClient.Create(ctx, newRegistrationWithCA())).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+			expectNotReadyAndNoConfig(configWriter, reconciler)
+		})
+
+		It("fails the registration when the CA data is not valid PEM", func() {
+			createCASecret(true, []byte("not a certificate"))
+			Expect(testK8sClient.Create(ctx, newRegistrationWithCA())).To(Succeed())
+
+			configWriter := newMockA2AConfigReaderWriter()
+			reconciler := newA2AReconciler(configWriter)
+			waitForA2ARegistrationCacheSync(ctx, a2aNamespacedName)
+			expectNotReadyAndNoConfig(configWriter, reconciler)
+		})
+	})
+
 	Context("A2AAgentRegistration CRD validation", func() {
 		AfterEach(func() {
 			forceDeleteTestA2AAgentRegistration(ctx, "cel-probe", "default")

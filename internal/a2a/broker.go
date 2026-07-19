@@ -31,6 +31,8 @@ type Broker struct {
 	agents       map[string]*config.A2AAgent // keyed by "{namespace}/{agentPrefix}"
 	invalid      map[string]string           // key -> reason the card failed validation; excluded from discovery
 	externalHost string                      // gateway public host, for card interface validation
+	caCertPEM    string                      // gateway-level CA bundle, added to card-fetch trust pools
+	clients      map[string]*agentClient     // per-agent card-fetch clients, for agents with custom trust
 }
 
 var _ config.Observer = (*Broker)(nil)
@@ -48,6 +50,7 @@ func NewBroker(logger *slog.Logger, store CardStore, interval time.Duration) *Br
 		interval: interval,
 		agents:   map[string]*config.A2AAgent{},
 		invalid:  map[string]string{},
+		clients:  map[string]*agentClient{},
 	}
 }
 
@@ -56,6 +59,7 @@ func NewBroker(logger *slog.Logger, store CardStore, interval time.Duration) *Br
 func (b *Broker) OnConfigChange(_ context.Context, cfg *config.MCPServersConfig) {
 	b.mu.Lock()
 	b.externalHost = cfg.GetExternalHostname()
+	b.caCertPEM = cfg.GetGatewayCACertPEM()
 	b.mu.Unlock()
 	b.SetAgents(cfg.ListA2AAgents())
 }
@@ -72,10 +76,15 @@ func (b *Broker) SetAgents(agents []*config.A2AAgent) {
 	}
 	b.mu.Lock()
 	b.agents = next
-	// drop validation state for agents that are no longer registered
+	// drop validation state and cached clients for agents that are no longer registered
 	for key := range b.invalid {
 		if _, ok := next[key]; !ok {
 			delete(b.invalid, key)
+		}
+	}
+	for key := range b.clients {
+		if _, ok := next[key]; !ok {
+			delete(b.clients, key)
 		}
 	}
 	b.mu.Unlock()
