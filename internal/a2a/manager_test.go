@@ -410,3 +410,80 @@ func TestValidation_UsesExternalHostFromConfig(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestSetAgents_RefetchesWhenCardURLChanges(t *testing.T) {
+	cardA := `{"name":"a","supportedInterfaces":[{"url":"http://gw.example/a2a/mcp-test/weather"}]}`
+	cardB := `{"name":"b","supportedInterfaces":[{"url":"http://gw.example/a2a/mcp-test/weather"}]}`
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(cardA))
+	}))
+	defer srvA.Close()
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(cardB))
+	}))
+	defer srvB.Close()
+
+	b := newTestBroker()
+	b.SetAgents([]*config.A2AAgent{{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: srvA.URL}})
+	waitForCard(t, b, cardA, "card from the first endpoint was never cached")
+
+	// the registration is re-pointed at a different backend; the old card must not
+	// be served until the next tick — the change triggers a prompt re-fetch
+	b.SetAgents([]*config.A2AAgent{{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: srvB.URL}})
+	waitForCard(t, b, cardB, "card was not re-fetched after the endpoint changed")
+}
+
+func TestSetAgents_RefetchesWhenCredentialChanges(t *testing.T) {
+	var lastAuth atomic.Value
+	lastAuth.Store("")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastAuth.Store(r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(gatewayCard("mcp-test", "weather")))
+	}))
+	defer srv.Close()
+
+	b := newTestBroker()
+	b.SetAgents([]*config.A2AAgent{{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: srv.URL, Credential: "Bearer one"}})
+	waitFor(t, "first fetch", func() bool { return lastAuth.Load() == "Bearer one" })
+
+	b.SetAgents([]*config.A2AAgent{{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: srv.URL, Credential: "Bearer two"}})
+	waitFor(t, "re-fetch with the rotated credential", func() bool { return lastAuth.Load() == "Bearer two" })
+}
+
+func TestSetAgents_RefetchesWhenCACertChanges(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = w.Write([]byte(gatewayCard("mcp-test", "weather")))
+	}))
+	defer srv.Close()
+	_, caPEM := tlsCardServer(t, "x", "y") // any valid PEM
+
+	b := newTestBroker()
+	b.SetAgents([]*config.A2AAgent{{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: srv.URL}})
+	waitFor(t, "first fetch", func() bool { return atomic.LoadInt32(&hits) >= 1 })
+
+	b.SetAgents([]*config.A2AAgent{{Name: "mcp-test/weather-agent", AgentPrefix: "weather", URL: srv.URL, CACert: caPEM}})
+	waitFor(t, "re-fetch after the CA changed", func() bool { return atomic.LoadInt32(&hits) >= 2 })
+}
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForCard polls until the cached weather card equals want.
+func waitForCard(t *testing.T, b *Broker, want, msg string) {
+	t.Helper()
+	waitFor(t, msg, func() bool {
+		e, ok := b.store.Get("mcp-test", "weather")
+		return ok && string(e.Raw) == want
+	})
+}

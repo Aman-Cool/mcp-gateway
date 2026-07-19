@@ -75,6 +75,7 @@ func (b *Broker) SetAgents(agents []*config.A2AAgent) {
 		next[pathKey(a)] = a
 	}
 	b.mu.Lock()
+	prev := b.agents
 	b.agents = next
 	// drop validation state and cached clients for agents that are no longer registered
 	for key := range b.invalid {
@@ -89,7 +90,7 @@ func (b *Broker) SetAgents(agents []*config.A2AAgent) {
 	}
 	b.mu.Unlock()
 	b.evictStaleCards(next)
-	b.refreshNewCards(next)
+	b.refreshNewCards(prev, next)
 	b.logger.Debug("a2a broker agents updated", "count", len(next))
 }
 
