@@ -34,20 +34,18 @@ var _ = Describe("MCP Gateway Registration Happy Path", func() {
 	})
 
 	It("[Happy] basic registration tool invocation and unregistration", func() {
-		testResources := []client.Object{}
-		deferCleanupResources(&testResources)
 		mcpGatewayClient := newTestGatewayClient()
 
 		By("Creating HTTPRoutes and MCP Servers")
-		// create httproutes for test servers that should already be deployed
 		registration1 := NewMCPServerResourcesWithDefaults("basic-registration", k8sClient).WithPrefix("server1").Build()
-		// Important as we need to make sure to clean up
-		testResources = append(testResources, registration1.GetObjects()...)
 		httpRoute1Name := registration1.GetHTTPRouteName()
+		reg1Objects := registration1.GetObjects()
+		deferCleanupResources(&reg1Objects)
 		registeredServer1 := registration1.Register(ctx)
+
 		registration2 := NewMCPServerResourcesWithDefaults("basic-registration", k8sClient).WithPrefix("server2").Build()
-		// Important as we need to make sure to clean up
-		testResources = append(testResources, registration2.GetObjects()...)
+		reg2Objects := registration2.GetObjects()
+		deferCleanupResources(&reg2Objects)
 		registeredServer2 := registration2.Register(ctx)
 
 		By("Verifying MCPServerRegistrations become ready")

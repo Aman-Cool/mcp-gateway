@@ -434,6 +434,17 @@ When the `A2AAgentRegistration` is deleted, the agent's gateway path is removed 
 ### [Happy,A2A] MCP tool discovery is unaffected while an A2A agent is registered
 
 While an A2A agent is registered and cataloged, MCP `tools/list` through the same gateway still succeeds — A2A support is additive and does not disturb MCP traffic.
+### [Full] Large response payload from backend MCP
+
+- When a backend MCP server returns a large response (e.g. a tool that returns a multi-megabyte file or dataset), the gateway should stream the full response back to the client without truncation or corruption. The response body should match byte-for-byte what the upstream sent.
+
+### [Full] Full payload validation via backend MCP
+
+- When a client sends a tools/call request through the gateway, the backend MCP server should receive the exact JSON-RPC payload the client sent (with prefix-stripped tool name). All fields — params, arguments, nested objects — should arrive intact. The backend returns a response echoing the received payload for verification.
+
+### [Full] Large request payload up to 1MB
+
+- When a client sends a tools/call request with a body approaching the default `--max-request-body-size` limit (5MB, test with ~1MB), the gateway should forward the full request to the backend without truncation. The ext_proc body phase must handle the complete payload and the backend should receive and process it successfully.
 
 ## Common pitfalls
 
