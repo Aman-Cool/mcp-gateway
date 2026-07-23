@@ -59,3 +59,4 @@ config/e2e/kustomization.yaml
 
 # locally-compiled test-server binaries (images build these in Docker; never commit them)
 /tests/servers/custom-response-server/custom-response-server
+/tests/servers/a2a-server/a2a-server
