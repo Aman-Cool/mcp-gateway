@@ -88,7 +88,7 @@ type app struct {
 	elicitHandler  http.Handler
 	brokerServer   *http.Server
 	grpcServer     *grpc.Server
-	router         *mcpRouter.ExtProcServer
+	server         *mcpRouter.ExtProcServer
 }
 
 func main() {
@@ -256,7 +256,7 @@ func (a *app) buildHairpinClient() {
 }
 
 func (a *app) registerObservers() {
-	a.mcpConfig.RegisterObserver(a.router)
+	a.mcpConfig.RegisterObserver(a.server)
 	a.mcpConfig.RegisterObserver(a.mcpBroker)
 	a.mcpConfig.RegisterObserver(a.a2aBroker)
 }
