@@ -17,6 +17,7 @@ func (a *app) createRouter() {
 		SessionCache:       a.sessionCache,
 		ElicitationMap:     a.elicitMap,
 		MaxRequestBodySize: cfg.maxRequestBodySize,
+		A2ABroker:          a.a2aBroker,
 	}
 
 	if a.mcpConfig == nil {

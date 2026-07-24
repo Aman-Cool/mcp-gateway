@@ -140,6 +140,29 @@ func (rb *ResponseBuilder) WithImmediateJSONRPCResponse(statusCode int32, setHea
 	return rb
 }
 
+// WithImmediateJSONResponse adds an immediate response with an application/json
+// body that terminates request processing. Used for A2A JSON-RPC error envelopes,
+// which A2A clients parse as JSON rather than the SSE form MCP errors use.
+func (rb *ResponseBuilder) WithImmediateJSONResponse(statusCode int32, message string) *ResponseBuilder {
+	rb.response = append(rb.response, &eppb.ProcessingResponse{
+		Response: &eppb.ProcessingResponse_ImmediateResponse{
+			ImmediateResponse: &eppb.ImmediateResponse{
+				Status: &typepb.HttpStatus{
+					Code: typepb.StatusCode(statusCode),
+				},
+				Body:    []byte(message),
+				Details: "a2a routing error",
+				Headers: &eppb.HeaderMutation{
+					SetHeaders: []*basepb.HeaderValueOption{
+						{Header: &basepb.HeaderValue{Key: "content-type", RawValue: []byte("application/json")}},
+					},
+				},
+			},
+		},
+	})
+	return rb
+}
+
 // WithDoNothingResponse adds an empty response that allows request to continue unmodified
 func (rb *ResponseBuilder) WithDoNothingResponse(isStreaming bool) *ResponseBuilder {
 	if isStreaming {

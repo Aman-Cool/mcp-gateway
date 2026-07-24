@@ -1,35 +1,46 @@
 package mcprouter
 
-// a2a spike: derisks the per-method response ModeOverride (BUFFERED for
-// non-streaming methods, STREAMED for sse methods) chosen at the
-// response-headers phase. not production routing: agent resolution and
-// task-id mapping are stubbed. see docs/design/a2a/a2a-design.md.
+// a2a request-side routing: classify discovery (GET card/catalog, passthrough to
+// the broker) vs invocation (POST JSON-RPC, routed to the resolved agent), resolve
+// the agent from the namespace-qualified path, and classify the JSON-RPC method.
+// task ids pass through unchanged — the gateway never rewrites them; fail-closed
+// ownership binding is a later phase. see docs/design/a2a/a2a-design.md.
 
 import (
-	"context"
 	"encoding/json"
-	"log/slog"
 	"strings"
-
-	extprochttp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 )
-
-const a2aPathPrefix = "/a2a/"
 
 const (
-	a2aMethodSendMessage   = "message/send"
-	a2aMethodStreamMessage = "message/stream"
-	a2aMethodResubscribe   = "tasks/resubscribe"
+	a2aPathPrefix = "/a2a/"
+	// a2aBackendPath is the upstream A2A JSON-RPC endpoint. The registration
+	// endpoint carries no path (it is protocol-defined), so the router rewrites the
+	// public /a2a/{namespace}/{prefix} path to this fixed backend path.
+	a2aBackendPath = "/a2a"
 )
 
-// a2aSpikeTaskIDPrefix makes the buffered rewrite observable from the
-// client: a task id with this prefix proves the mutation happened in envoy.
-const a2aSpikeTaskIDPrefix = "gw-"
+// v1.0 JSON-RPC method names the gateway routes (a2a.proto service methods).
+const (
+	a2aMethodSendMessage     = "SendMessage"
+	a2aMethodSendStreaming   = "SendStreamingMessage"
+	a2aMethodGetTask         = "GetTask"
+	a2aMethodCancelTask      = "CancelTask"
+	a2aMethodSubscribeToTask = "SubscribeToTask"
+)
 
-// a2aState is per-stream state for an in-flight a2a request, kept separate
-// from mcpRequest so the two protocols never share parsing state.
+// JSON-RPC error codes: standard (-32700, -32602) plus A2A spec §8.2 (-32001..-32007).
+const (
+	a2aErrParse            = -32700 // request body is not valid JSON-RPC
+	a2aErrInvalidParams    = -32602 // path resolves to no registered agent
+	a2aErrPushNotSupported = -32003 // request embeds a push-notification config
+	a2aErrUnsupportedOp    = -32004 // method is not routed by this gateway
+)
+
+// a2aState is per-stream state for an in-flight a2a request, kept separate from
+// mcpRequest so the two protocols never share parsing state.
 type a2aState struct {
-	method    string
+	discovery bool   // GET card/catalog fetch: passed through to the broker
+	method    string // v1 JSON-RPC method (invocation only)
 	streaming bool
 }
 
@@ -37,80 +48,79 @@ func isA2APath(path string) bool {
 	return strings.HasPrefix(path, a2aPathPrefix)
 }
 
+func isSupportedA2AMethod(method string) bool {
+	switch method {
+	case a2aMethodSendMessage, a2aMethodSendStreaming, a2aMethodGetTask, a2aMethodCancelTask, a2aMethodSubscribeToTask:
+		return true
+	}
+	return false
+}
+
 func isA2AStreamingMethod(method string) bool {
-	return method == a2aMethodStreamMessage || method == a2aMethodResubscribe
+	return method == a2aMethodSendStreaming || method == a2aMethodSubscribeToTask
 }
 
-// parseA2AMethod reads only the json-rpc envelope; params are never
-// unmarshalled (envelope-only discipline from the design).
-func parseA2AMethod(body []byte) (string, error) {
-	var envelope struct {
-		Method string `json:"method"`
+// resolveA2APath splits "/a2a/{namespace}/{prefix}" into its namespace and agent
+// prefix. Only the first two segments after the /a2a/ prefix identify the agent;
+// trailing segments and any query string are ignored.
+func resolveA2APath(path string) (namespace, prefix string, ok bool) {
+	rest := strings.TrimPrefix(path, a2aPathPrefix)
+	if i := strings.IndexByte(rest, '?'); i >= 0 {
+		rest = rest[:i]
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return "", err
+	segments := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
+		return "", "", false
 	}
-	return envelope.Method, nil
+	return segments[0], segments[1], true
 }
 
-// a2aModeOverride returns the per-method processing mode: BUFFERED for
-// non-streaming methods so the full response body can be rewritten in one
-// pass, STREAMED for sse methods so chunks flow through as they arrive.
-func a2aModeOverride(streaming bool) *extprochttp.ProcessingMode {
-	bodyMode := extprochttp.ProcessingMode_BUFFERED
-	if streaming {
-		bodyMode = extprochttp.ProcessingMode_STREAMED
-	}
-	return &extprochttp.ProcessingMode{
-		RequestHeaderMode:   extprochttp.ProcessingMode_SEND,
-		ResponseHeaderMode:  extprochttp.ProcessingMode_SEND,
-		ResponseBodyMode:    bodyMode,
-		RequestTrailerMode:  extprochttp.ProcessingMode_SKIP,
-		ResponseTrailerMode: extprochttp.ProcessingMode_SKIP,
-	}
+// a2aRequest is the envelope-only view of a JSON-RPC request. params is decoded
+// only far enough to detect an embedded push-notification config; message parts
+// and everything else stay raw.
+type a2aRequest struct {
+	Method string          `json:"method"`
+	ID     json.RawMessage `json:"id"`
+	Params struct {
+		Configuration struct {
+			PushNotificationConfig json.RawMessage `json:"pushNotificationConfig"`
+		} `json:"configuration"`
+	} `json:"params"`
 }
 
-// rewriteA2ABufferedTaskID rewrites result.id in a buffered non-streaming
-// a2a response, proving a BUFFERED body selected mid-request arrives whole
-// and is mutable. only the id key is decoded; sibling result fields stay
-// raw. any parse failure passes the body through untouched.
-func rewriteA2ABufferedTaskID(ctx context.Context, logger *slog.Logger, body []byte) []byte {
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		logger.DebugContext(ctx, "a2a spike: response not json, passing through", "error", err)
-		return body
+// parseA2ARequest reads the json-rpc envelope. hasPush reports an embedded
+// push-notification config, which the gateway rejects rather than forwards.
+func parseA2ARequest(body []byte) (method string, id json.RawMessage, hasPush bool, err error) {
+	var req a2aRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", nil, false, err
 	}
-	resultRaw, ok := envelope["result"]
-	if !ok {
-		return body
+	return req.Method, req.ID, len(req.Params.Configuration.PushNotificationConfig) > 0, nil
+}
+
+type a2aErrorObject struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type a2aErrorResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Error   a2aErrorObject  `json:"error"`
+}
+
+// a2aErrorBody builds a JSON-RPC error envelope, echoing the request id when known.
+func a2aErrorBody(id json.RawMessage, code int, message string) string {
+	if len(id) == 0 {
+		id = json.RawMessage("null")
 	}
-	var result map[string]json.RawMessage
-	if err := json.Unmarshal(resultRaw, &result); err != nil {
-		return body
-	}
-	idRaw, ok := result["id"]
-	if !ok {
-		// message/send may return a plain message (no task): pass through
-		return body
-	}
-	var id string
-	if err := json.Unmarshal(idRaw, &id); err != nil || id == "" {
-		return body
-	}
-	newID, err := json.Marshal(a2aSpikeTaskIDPrefix + id)
+	body, err := json.Marshal(a2aErrorResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   a2aErrorObject{Code: code, Message: message},
+	})
 	if err != nil {
-		return body
+		return `{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error"}}`
 	}
-	result["id"] = newID
-	newResult, err := json.Marshal(result)
-	if err != nil {
-		return body
-	}
-	envelope["result"] = newResult
-	newBody, err := json.Marshal(envelope)
-	if err != nil {
-		return body
-	}
-	logger.DebugContext(ctx, "a2a spike: rewrote buffered task id", "task", id)
-	return newBody
+	return string(body)
 }

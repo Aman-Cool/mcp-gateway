@@ -1,13 +1,8 @@
 package mcprouter
 
 import (
-	"context"
 	"encoding/json"
-	"log/slog"
-	"strings"
 	"testing"
-
-	extprochttp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 )
 
 func TestIsA2APath(t *testing.T) {
@@ -15,8 +10,8 @@ func TestIsA2APath(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"/a2a/weather", true},
-		{"/a2a/weather/.well-known/agent-card.json", true},
+		{"/a2a/mcp-test/weather", true},
+		{"/a2a/mcp-test/weather/.well-known/agent-card.json", true},
 		{"/mcp", false},
 		{"/a2a", false},
 		{"/", false},
@@ -28,28 +23,51 @@ func TestIsA2APath(t *testing.T) {
 	}
 }
 
-func TestParseA2AMethod(t *testing.T) {
+func TestResolveA2APath(t *testing.T) {
 	cases := []struct {
-		name    string
-		body    string
-		want    string
-		wantErr bool
+		name          string
+		path          string
+		wantNamespace string
+		wantPrefix    string
+		wantOK        bool
 	}{
-		{"send", `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{}}}`, "message/send", false},
-		{"stream", `{"jsonrpc":"2.0","id":1,"method":"message/stream","params":{}}`, "message/stream", false},
-		{"missing method", `{"jsonrpc":"2.0","id":1}`, "", false},
-		{"invalid json", `{not json`, "", true},
+		{"agent path", "/a2a/mcp-test/weather", "mcp-test", "weather", true},
+		{"trailing card segments ignored", "/a2a/mcp-test/weather/.well-known/agent-card.json", "mcp-test", "weather", true},
+		{"trailing slash", "/a2a/mcp-test/weather/", "mcp-test", "weather", true},
+		{"query string ignored", "/a2a/mcp-test/weather?x=1", "mcp-test", "weather", true},
+		{"missing prefix", "/a2a/mcp-test", "", "", false},
+		{"empty", "/a2a/", "", "", false},
+		{"double slash", "/a2a//weather", "", "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := parseA2AMethod([]byte(c.body))
-			if (err != nil) != c.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
-			}
-			if got != c.want {
-				t.Errorf("method = %q, want %q", got, c.want)
+			ns, prefix, ok := resolveA2APath(c.path)
+			if ok != c.wantOK || ns != c.wantNamespace || prefix != c.wantPrefix {
+				t.Errorf("resolveA2APath(%q) = (%q, %q, %v), want (%q, %q, %v)", c.path, ns, prefix, ok, c.wantNamespace, c.wantPrefix, c.wantOK)
 			}
 		})
+	}
+}
+
+func TestIsSupportedA2AMethod(t *testing.T) {
+	cases := []struct {
+		method string
+		want   bool
+	}{
+		{a2aMethodSendMessage, true},
+		{a2aMethodSendStreaming, true},
+		{a2aMethodGetTask, true},
+		{a2aMethodCancelTask, true},
+		{a2aMethodSubscribeToTask, true},
+		{"ListTasks", false},
+		{"GetExtendedAgentCard", false},
+		{"message/send", false}, // v0.3 name, not v1
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isSupportedA2AMethod(c.method); got != c.want {
+			t.Errorf("isSupportedA2AMethod(%q) = %v, want %v", c.method, got, c.want)
+		}
 	}
 }
 
@@ -58,11 +76,11 @@ func TestIsA2AStreamingMethod(t *testing.T) {
 		method string
 		want   bool
 	}{
-		{a2aMethodStreamMessage, true},
-		{a2aMethodResubscribe, true},
+		{a2aMethodSendStreaming, true},
+		{a2aMethodSubscribeToTask, true},
 		{a2aMethodSendMessage, false},
-		{"tasks/get", false},
-		{"tasks/cancel", false},
+		{a2aMethodGetTask, false},
+		{a2aMethodCancelTask, false},
 	}
 	for _, c := range cases {
 		if got := isA2AStreamingMethod(c.method); got != c.want {
@@ -71,64 +89,66 @@ func TestIsA2AStreamingMethod(t *testing.T) {
 	}
 }
 
-func TestA2AModeOverride(t *testing.T) {
-	if got := a2aModeOverride(false).ResponseBodyMode; got != extprochttp.ProcessingMode_BUFFERED {
-		t.Errorf("non-streaming ResponseBodyMode = %v, want BUFFERED", got)
+func TestParseA2ARequest(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        string
+		wantMethod  string
+		wantHasPush bool
+		wantErr     bool
+	}{
+		{"send message", `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{}}}`, "SendMessage", false, false},
+		{"get task", `{"jsonrpc":"2.0","id":"a","method":"GetTask","params":{"id":"t-1"}}`, "GetTask", false, false},
+		{"embedded push config", `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"configuration":{"pushNotificationConfig":{"url":"https://x"}}}}`, "SendMessage", true, false},
+		{"no push config", `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"configuration":{"blocking":true}}}`, "SendMessage", false, false},
+		{"invalid json", `{not json`, "", false, true},
 	}
-	if got := a2aModeOverride(true).ResponseBodyMode; got != extprochttp.ProcessingMode_STREAMED {
-		t.Errorf("streaming ResponseBodyMode = %v, want STREAMED", got)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			method, _, hasPush, err := parseA2ARequest([]byte(c.body))
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
+			}
+			if method != c.wantMethod {
+				t.Errorf("method = %q, want %q", method, c.wantMethod)
+			}
+			if hasPush != c.wantHasPush {
+				t.Errorf("hasPush = %v, want %v", hasPush, c.wantHasPush)
+			}
+		})
 	}
 }
 
-func TestRewriteA2ABufferedTaskID(t *testing.T) {
-	logger := slog.New(slog.DiscardHandler)
-	ctx := context.Background()
+func TestParseA2ARequestEchoesID(t *testing.T) {
+	_, id, _, err := parseA2ARequest([]byte(`{"jsonrpc":"2.0","id":42,"method":"GetTask"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(id) != "42" {
+		t.Errorf("id = %s, want 42", id)
+	}
+}
 
-	t.Run("rewrites task id", func(t *testing.T) {
-		body := `{"jsonrpc":"2.0","id":1,"result":{"id":"task-abc","kind":"task","status":{"state":"completed"}}}`
-		out := rewriteA2ABufferedTaskID(ctx, logger, []byte(body))
-		var envelope struct {
-			Result struct {
-				ID string `json:"id"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal(out, &envelope); err != nil {
+func TestA2AErrorBody(t *testing.T) {
+	t.Run("echoes id and codes error", func(t *testing.T) {
+		body := a2aErrorBody(json.RawMessage("42"), a2aErrUnsupportedOp, "nope")
+		var resp a2aErrorResponse
+		if err := json.Unmarshal([]byte(body), &resp); err != nil {
 			t.Fatalf("output not json: %v", err)
 		}
-		if envelope.Result.ID != "gw-task-abc" {
-			t.Errorf("result.id = %q, want %q", envelope.Result.ID, "gw-task-abc")
+		if resp.JSONRPC != "2.0" || string(resp.ID) != "42" || resp.Error.Code != a2aErrUnsupportedOp || resp.Error.Message != "nope" {
+			t.Errorf("unexpected error body: %s", body)
 		}
 	})
 
-	t.Run("preserves sibling result fields", func(t *testing.T) {
-		body := `{"jsonrpc":"2.0","id":1,"result":{"id":"task-abc","artifacts":[{"parts":[{"kind":"file","file":{"bytes":"aGVhdnk="}}]}]}}`
-		out := rewriteA2ABufferedTaskID(ctx, logger, []byte(body))
-		if !strings.Contains(string(out), `"aGVhdnk="`) {
-			t.Errorf("artifact bytes not preserved: %s", out)
+	t.Run("null id when unknown", func(t *testing.T) {
+		body := a2aErrorBody(nil, a2aErrInvalidParams, "no agent")
+		var resp a2aErrorResponse
+		if err := json.Unmarshal([]byte(body), &resp); err != nil {
+			t.Fatalf("output not json: %v", err)
 		}
-	})
-
-	t.Run("passes through message result without id", func(t *testing.T) {
-		body := `{"jsonrpc":"2.0","id":1,"result":{"kind":"message","messageId":"m-1"}}`
-		out := rewriteA2ABufferedTaskID(ctx, logger, []byte(body))
-		if string(out) != body {
-			t.Errorf("body changed: %s", out)
-		}
-	})
-
-	t.Run("passes through non-json", func(t *testing.T) {
-		body := `not json`
-		out := rewriteA2ABufferedTaskID(ctx, logger, []byte(body))
-		if string(out) != body {
-			t.Errorf("body changed: %s", out)
-		}
-	})
-
-	t.Run("passes through error response", func(t *testing.T) {
-		body := `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"task not found"}}`
-		out := rewriteA2ABufferedTaskID(ctx, logger, []byte(body))
-		if string(out) != body {
-			t.Errorf("body changed: %s", out)
+		if string(resp.ID) != "null" {
+			t.Errorf("id = %s, want null", resp.ID)
 		}
 	})
 }
